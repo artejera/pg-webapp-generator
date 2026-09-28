@@ -1,0 +1,22 @@
+{
+  "name": "pg-webapp-generator",
+  "version": "1.0.0",
+  "description": "Generator that creates a standalone CRUD webapp from a PostgreSQL DDL/schema",
+  "main": "generator.js",
+  "bin": {
+    "pg-webapp-generator": "./generator.js"
+  },
+  "scripts": {
+    "generate": "node generator.js",
+    "start": "echo 'Use the generator first: npm run generate -- --help'"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "yargs": "^17.7.2"
+  }
+}
