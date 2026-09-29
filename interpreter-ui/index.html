@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PostgreSQL Schema Interpreter</title>
+  <link rel="stylesheet" href="/app/css/app.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="brand">
+        <span class="badge">Live</span>
+        <span>PostgreSQL Schema Interpreter</span>
+      </div>
+      <div id="conn" class="conn disconnected">
+        <span id="conn-pill" class="pill" title="Not connected — click Connect to Postgres to get started">
+          <span class="dot"></span>
+          <span id="conn-text">Not connected</span>
+        </span>
+        <button id="btn-connect" class="btn btn-primary btn-small" type="button">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor" style="width:14px;height:14px">
+            <path d="M2 3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v2.382a3.99 3.99 0 0 0-2 0V4H3v8h4.382a3.99 3.99 0 0 0 0 2H3a1 1 0 0 1-1-1V3Zm11 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm.5 1a.5.5 0 0 0-.5.5V10h-1.5a.5.5 0 0 0 0 1H13v1.5a.5.5 0 0 0 1 0V11h1.5a.5.5 0 0 0 0-1H14V8.5a.5.5 0 0 0-.5-.5Z"/>
+          </svg>
+          Connect to Postgres
+        </button>
+        <button id="btn-disconnect" class="btn btn-small" type="button" style="display:none">Disconnect</button>
+      </div>
+    </div>
+
+    <aside class="sidebar">
+      <h3>Schema tables</h3>
+      <ul id="tables-list"><li><div class="empty-msg">Connect to a Postgres database to see the tables.<br/>Click <a href="#" id="empty-connect">Connect to Postgres</a>.</div></li></ul>
+    </aside>
+
+    <main class="content" id="content">
+      <div class="welcome" id="welcome-card">
+        <h1>Interact with Postgres tables live — no code generation</h1>
+        <p class="lede">
+          This is the DDL interpreter mode. Enter Postgres credentials, and we'll
+          interpret the schema at runtime: one live page per table with pagination,
+          Create / Update / Delete, and in-UI error banners — all without writing
+          any generated files to disk.
+        </p>
+
+        <h2>Quick start</h2>
+        <ul>
+          <li>Click <strong>Connect to Postgres</strong> at the top-right (or use the link in the sidebar) to enter credentials.</li>
+          <li>The credential dialog has two modes — pick <strong>Interact live (no code generation)</strong>.</li>
+          <li>After connecting, pick any table from the left sidebar to browse rows, modify, create, or delete.</li>
+          <li>You can <em>re-enter credentials at any time</em> by clicking the connection pill or <strong>Connect to Postgres</strong> in the header — even while already connected.</li>
+        </ul>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/dialog.js"></script>
+  <script src="/app/js/app.js"></script>
+</body>
+</html>

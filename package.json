@@ -8,7 +8,7 @@
   },
   "scripts": {
     "generate": "node generator.js",
-    "start": "echo 'Use the generator first: npm run generate -- --help'"
+    "start": "node generator-ui.js"
   },
   "engines": {
     "node": ">=18"

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PostgreSQL Webapp Generator</title>
+<link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <h1>PostgreSQL Webapp Generator</h1>
+      <p>
+        Point us at a Postgres database. We'll extract the DDL/schema and generate
+        a full standalone webapp &mdash; one dynamic page per table with pagination,
+        CRUD interactions, and in-UI error reporting from the database.
+      </p>
+      <div class="cta-row">
+        <button id="btn-open" class="btn btn-primary btn-large" type="button">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor">
+            <path d="M2 3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v2.382a3.99 3.99 0 0 0-2 0V4H3v8h4.382a3.99 3.99 0 0 0 0 2H3a1 1 0 0 1-1-1V3Zm11 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm.5 1a.5.5 0 0 0-.5.5V10h-1.5a.5.5 0 0 0 0 1H13v1.5a.5.5 0 0 0 1 0V11h1.5a.5.5 0 0 0 0-1H14V8.5a.5.5 0 0 0-.5-.5Z"/>
+          </svg>
+          Connect to PostgreSQL &amp; Generate
+        </button>
+        <a id="btn-cli-help" class="btn" href="https://github.com" onclick="event.preventDefault();document.getElementById('cli-help').scrollIntoView({behavior:'smooth'})">
+          Or use the CLI
+        </a>
+      </div>
+    </section>
+
+    <section class="steps card">
+      <div class="step">
+        <div class="num">1</div>
+        <h3>Enter credentials</h3>
+        <p>Hostname, port, database, user, password. Advanced: schema filter and output directory.</p>
+      </div>
+      <div class="step">
+        <div class="num">2</div>
+        <h3>Extract schema</h3>
+        <p>We scan your tables, columns, types, defaults, identities, primary &amp; foreign keys.</p>
+      </div>
+      <div class="step">
+        <div class="num">3</div>
+        <h3>Get a webapp</h3>
+        <p>Generates a standalone Express.js backend + HTML/CSS/JS frontend ready for <code>npm install &amp;&amp; npm start</code>.</p>
+      </div>
+    </section>
+
+    <section id="cli-help" class="card" style="margin-top:28px">
+      <h3 style="margin:0 0 8px">Prefer the command line?</h3>
+      <p style="color:var(--color-muted);margin:0 0 10px">Run the generator directly from a terminal:</p>
+      <pre style="background:#0d1117;border:1px solid var(--color-border);border-radius:8px;padding:14px;margin:0;color:#c9d1d9;font-size:13px;line-height:1.55;overflow-x:auto;word-break:break-all">node generator.js \
+  --host localhost \
+  --port 5432 \
+  --db mydb \
+  --user postgres \
+  --pass 'yourpassword' \
+  --schema public \
+  --output ./mywebapp \
+  [--overwrite]</pre>
+    </section>
+  </main>
+
+  <script src="js/dialog.js"></script>
+  <script>
+    (function () {
+      var btn = document.getElementById('btn-open');
+      btn.addEventListener('click', function () {
+        window.GeneratorUI.openDialog({
+          host: localStorage.getItem('pg.host')     || 'localhost',
+          port: localStorage.getItem('pg.port')     || 5432,
+          database: localStorage.getItem('pg.db')   || '',
+          user: localStorage.getItem('pg.user')     || 'postgres',
+          password: '',
+          schema: localStorage.getItem('pg.schema') || 'public',
+          output: localStorage.getItem('pg.output') || 'generated-webapp',
+          overwrite: false,
+          ssl: false,
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

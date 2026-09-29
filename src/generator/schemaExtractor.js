@@ -154,6 +154,8 @@ async function extractSchema(conn, opts = {}) {
         port: conn.port,
         database: conn.database,
         user: conn.user,
+        password: conn.password == null ? '' : String(conn.password),
+        ssl: !!conn.ssl,
       },
       tables,
     };

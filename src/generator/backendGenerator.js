@@ -39,6 +39,7 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { registerRoutes } = require('./routes');
+const { healthCheck } = require('./db');
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -51,8 +52,22 @@ function createApp() {
 
   app.use(express.static(path.join(__dirname, 'public')));
 
-  app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+  app.get('/api/health', async (_req, res) => {
+    try {
+      await healthCheck();
+      res.json({ status: 'ok', db: 'ok', time: new Date().toISOString() });
+    } catch (err) {
+      const body = {
+        status: 'degraded',
+        db: 'error',
+        error: err && err.message ? err.message : String(err),
+        time: new Date().toISOString(),
+      };
+      if (err && err.code) body.code = err.code;
+      if (err && err.detail) body.detail = err.detail;
+      if (err && err.hints && err.hints.length) body.hints = err.hints;
+      res.status(503).json(body);
+    }
   });
 
   registerRoutes(app);
@@ -71,6 +86,7 @@ function createApp() {
     if (err && err.hint)   body.hint   = err.hint;
     if (err && err.code)   body.code   = err.code;
     if (err && err.column) body.column = err.column;
+    if (err && err.hints && err.hints.length) body.hints = err.hints;
     res.status(status >= 400 ? status : 500).json(body);
   });
 
@@ -79,8 +95,25 @@ function createApp() {
 
 if (require.main === module) {
   const app = createApp();
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log('Server listening on http://localhost:' + PORT);
+  });
+  server.on('listening', async () => {
+    try {
+      await healthCheck();
+      console.log('[db] Connected successfully.');
+    } catch (err) {
+      const msg = (err && err.message) || String(err);
+      const hints = (err && err.hints) || [];
+      console.warn('');
+      console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+      console.warn('[db] Could NOT connect to Postgres.');
+      console.warn('[db]   ' + msg);
+      if (hints.length) hints.forEach(h => console.warn('[db]   • ' + h));
+      console.warn('[db] Check the generated .env file (host/port/db/user/password)');
+      console.warn('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
+      console.warn('');
+    }
   });
 }
 
@@ -101,7 +134,7 @@ function _pgEnv(name, fallback) {
   return v;
 }
 
-const pool = new Pool({
+const _connConfig = {
   host:     _pgEnv('PGHOST', 'localhost'),
   port:     Number(_pgEnv('PGPORT', 5432)),
   database: _pgEnv('PGDATABASE', ''),
@@ -111,15 +144,126 @@ const pool = new Pool({
   max: 20,
   idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 5000,
-});
+};
+
+const pool = new Pool(_connConfig);
 
 pool.on('error', (err) => {
   console.error('[pg pool error]', err && err.message, err && err.code);
 });
 
+function missingEnvError(msg, hints) {
+  const e = new Error(msg || 'Database connection failed.');
+  e.status = 503;
+  e.code = 'ENV_MISSING';
+  if (Array.isArray(hints) && hints.length) e.hints = hints;
+  return e;
+}
+
+function translateConnectionError(err) {
+  if (!err) return missingEnvError('Database connection failed.', []);
+  const msg = String((err && err.message) ? err.message : err);
+  const code = (err && err.code) || '';
+  const host = (_connConfig && _connConfig.host) || 'localhost';
+  const port = String((_connConfig && _connConfig.port) || 5432);
+  const dbName = String((_connConfig && _connConfig.database) || '(empty)');
+  const hints = [];
+  let title = 'Unable to connect to Postgres';
+  let text = msg;
+
+  const scramLike = msg.includes('SCRAM') || msg.includes('SASL') || msg.includes('client password must be') || /password/i.test(msg);
+  const authLike = scramLike || code === '28P01' || code === '28000';
+
+  if (authLike) {
+    title = 'Postgres authentication failed';
+    text = 'The database rejected the username / password combination. PGPASSWORD in the generated .env file is missing, empty, or incorrect.';
+    hints.push('Open .env at the root of the generated webapp folder and verify PGPASSWORD is set.');
+    hints.push('Confirm PGUSER is a valid Postgres role, and the password in Postgres matches PGPASSWORD.');
+    if (!_connConfig || !_connConfig.database) hints.push('PGDATABASE is currently empty — set it to a real database name.');
+  } else if (code === 'ECONNREFUSED') {
+    title = 'Could not reach Postgres';
+    text  = 'Connection refused to ' + host + ':' + port + ' — Postgres is probably not running or not listening there.';
+    hints.push('Start Postgres on ' + host + ':' + port + ', or edit PGHOST / PGPORT in .env.');
+    hints.push('Check firewalls / security groups between this machine and the database host.');
+  } else if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    title = 'Unknown database host';
+    text  = 'Could not resolve host "' + host + '".';
+    hints.push('Verify PGHOST in .env (currently: ' + host + ').');
+  } else if (code === '3D000') {
+    title = 'Database does not exist';
+    text  = 'Database "' + dbName + '" does not exist or PGUSER cannot access it.';
+    hints.push('Set PGDATABASE in .env to a real Postgres database name.');
+  } else if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
+    title = 'Database connection timed out';
+    text  = 'Timed out connecting to ' + host + ':' + port + '.';
+    hints.push('Check host/port, network reachability, and that Postgres accepts TCP connections.');
+  }
+
+  const e = new Error(title + ': ' + text);
+  e.status = 503;
+  e.code = code || 'PG_CONN';
+  e.hints = hints;
+  if (err && err.code)   e.code   = err.code;
+  if (err && err.detail) e.detail = err.detail;
+  if (err && err.hint)   e.hint   = err.hint;
+  if (err && err.column) e.column = err.column;
+  return e;
+}
+
+function validateCredentials() {
+  const missing = [];
+  if (!_connConfig || !_connConfig.database) missing.push('PGDATABASE (database name is required)');
+  if (!_connConfig || !_connConfig.user)     missing.push('PGUSER (username is required)');
+  if (!_connConfig || _connConfig.password === undefined || _connConfig.password === '')
+    missing.push('PGPASSWORD (password is required — SCRAM authentication needs a non-empty password)');
+  if (!_connConfig || !_connConfig.host || typeof _connConfig.port !== 'number' || !Number.isFinite(_connConfig.port) || _connConfig.port <= 0 || _connConfig.port > 65535)
+    missing.push('PGHOST / PGPORT (must be a valid hostname and integer port 1-65535)');
+
+  if (missing.length) {
+    const e = missingEnvError(
+      'Database credentials are missing or incomplete in the generated webapp .env file.',
+      missing.concat([
+        'Run: cp .env.example .env',
+        'Then fill in PGHOST / PGPORT / PGDATABASE / PGUSER / PGPASSWORD inside .env',
+        'Then restart the server.',
+      ])
+    );
+    return e;
+  }
+  return null;
+}
+
+async function healthCheck() {
+  const invalid = validateCredentials();
+  if (invalid) throw invalid;
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    throw translateConnectionError(err);
+  }
+  try {
+    await client.query('SELECT 1 AS ok');
+  } catch (err) {
+    throw translateConnectionError(err);
+  } finally {
+    if (client) try { client.release(); } catch (_) {}
+  }
+  return {
+    ok: true,
+    config: {
+      host: _connConfig.host,
+      port: _connConfig.port,
+      database: _connConfig.database,
+      user: _connConfig.user,
+    },
+  };
+}
+
 function quoteIdent(name) {
   return '"' + String(name).replace(/"/g, '\\"\\"') + '"';
 }
+
 
 function q(tableSchema, tableName) {
   return quoteIdent(tableSchema) + '.' + quoteIdent(tableName);
@@ -127,6 +271,13 @@ function q(tableSchema, tableName) {
 
 function pgError(err) {
   if (!err) return err;
+  const rawMsg = String((err && err.message) ? err.message : err);
+  const rawCode = err && err.code;
+  const scramLike = rawMsg.includes('SCRAM') || rawMsg.includes('SASL') || rawMsg.includes('client password must be') ||
+    rawCode === 'ECONNREFUSED' || rawCode === 'ENOTFOUND' || rawCode === 'EAI_AGAIN' ||
+    (typeof rawCode === 'string' && /^08|^57P01|^57P02|^58/.test(rawCode)) ||
+    rawCode === '3D000' || rawCode === 'ETIMEDOUT';
+  if (scramLike) return translateConnectionError(err);
   if (typeof err.status === 'number' && !err.code) return err;
   const computedStatus = (() => {
     switch (err.code) {
@@ -156,13 +307,20 @@ function pgError(err) {
 }
 
 async function listRows(schema, table, limit, offset) {
+  const invalid = validateCredentials();
+  if (invalid) throw invalid;
   const safeLimit = Math.max(1, Math.min(1000, Number(limit)  || 20));
   const safeOffset = Math.max(0, Number(offset) || 0);
   const sql =
     'SELECT * FROM ' + q(schema, table) +
     ' ORDER BY ctid LIMIT $1 OFFSET $2';
   const countSql = 'SELECT COUNT(*)::bigint AS total FROM ' + q(schema, table);
-  const client = await pool.connect();
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    throw translateConnectionError(err);
+  }
   try {
     const [rows, count] = await Promise.all([
       client.query(sql, [safeLimit, safeOffset]),
@@ -177,7 +335,7 @@ async function listRows(schema, table, limit, offset) {
   } catch (err) {
     throw pgError(err);
   } finally {
-    client.release();
+    if (client) try { client.release(); } catch (_) {}
   }
 }
 
@@ -196,6 +354,8 @@ function _splitKey(encoded, keyCols) {
 }
 
 async function getRow(schema, table, keyCols, encodedKey) {
+  const invalid = validateCredentials();
+  if (invalid) throw invalid;
   const values = _splitKey(encodedKey, keyCols);
   const where = keyCols
     .map((c, i) => quoteIdent(c) + ' = $' + (i + 1))
@@ -215,6 +375,8 @@ async function getRow(schema, table, keyCols, encodedKey) {
 }
 
 async function createRow(schema, table, data, allowedColumns, typeMap) {
+  const invalid = validateCredentials();
+  if (invalid) throw invalid;
   const allowSet = new Set(allowedColumns);
   const types = typeMap || {};
   const entries = Object.entries(data || {}).filter(([k]) => allowSet.has(k));
@@ -239,6 +401,8 @@ async function createRow(schema, table, data, allowedColumns, typeMap) {
 }
 
 async function updateRow(schema, table, keyCols, encodedKey, data, allowedColumns, typeMap) {
+  const invalid = validateCredentials();
+  if (invalid) throw invalid;
   const values = _splitKey(encodedKey, keyCols);
   const allowSet = new Set(allowedColumns.filter((c) => !keyCols.includes(c)));
   const types = typeMap || {};
@@ -270,6 +434,8 @@ async function updateRow(schema, table, keyCols, encodedKey, data, allowedColumn
 }
 
 async function deleteRow(schema, table, keyCols, encodedKey) {
+  const invalid = validateCredentials();
+  if (invalid) throw invalid;
   const values = _splitKey(encodedKey, keyCols);
   const where = keyCols.map((c, i) => quoteIdent(c) + ' = $' + (i + 1)).join(' AND ');
   const sql = 'DELETE FROM ' + q(schema, table) + ' WHERE ' + where + ' RETURNING *';
@@ -337,6 +503,7 @@ module.exports = {
   quoteIdent,
   typedCoerce,
   coerceForPg,
+  healthCheck,
 };
 `;
 }
@@ -442,15 +609,28 @@ module.exports = { registerRoutes, findTable, SCHEMA_TABLES };
 `;
 }
 
-function generateEnvExample() {
-  return `PGHOST=localhost
-PGPORT=5432
-PGDATABASE=mydb
-PGUSER=postgres
-PGPASSWORD=
-PGSSLMODE=disable
-PORT=3000
-`;
+function generateEnvExample(conn) {
+  const c = conn || {};
+  const host = c.host || 'localhost';
+  const port = c.port || 5432;
+  const database = c.database || '';
+  const user = c.user || 'postgres';
+  const password = c.password == null ? '' : String(c.password);
+  const ssl = c.ssl ? 'require' : 'disable';
+  return [
+    '# Auto-generated at generation time based on the credentials you entered.',
+    '# Review before use. This file is a TEMPLATE (not a secret by itself).',
+    '# The runtime file .env (which includes the real password) IS gitignored.',
+    '',
+    'PGHOST=' + host,
+    'PGPORT=' + port,
+    'PGDATABASE=' + database,
+    'PGUSER=' + user,
+    'PGPASSWORD=' + password,
+    'PGSSLMODE=' + ssl,
+    'PORT=3000',
+    '',
+  ].join('\n');
 }
 
 function generateOutputPackageJson() {
@@ -481,7 +661,7 @@ async function generateBackend(schema, outputDir) {
     'db.js':           generateDbJs(),
     'routes.js':       generateRoutesJs(schema),
     'package.json':    generateOutputPackageJson(),
-    '.env.example':    generateEnvExample(),
+    '.env.example':    generateEnvExample(schema && schema.conn),
     '.gitignore':      'node_modules/\n.env\n.DS_Store\n',
     'README.md':
       '# Auto-Generated PostgreSQL Webapp\n\n' +
