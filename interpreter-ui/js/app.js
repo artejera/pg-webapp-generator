@@ -77,7 +77,7 @@
     } catch (err) {
       const e = new Error('Network error: ' + err.message);
       e.code = 'NETWORK';
-      e.hints = ['Is the Generator UI server running? (npm start in project root)'];
+      e.hints = ['Is the server running? (npm start in project root)'];
       throw e;
     }
     let data = null;
@@ -109,13 +109,10 @@
       user: (state._saved && state._saved.user) || localStorage.getItem('pg.user') || 'postgres',
       password: (opts && opts.reusePassword && state._saved && state._saved.password) ? state._saved.password : '',
       schema: (state._saved && state._saved.schema) || localStorage.getItem('pg.schema') || 'public',
-      output: localStorage.getItem('pg.output') || 'generated-webapp',
       ssl: false,
-      overwrite: false,
-      _mode: opts.mode || (state.connection ? 'interact' : 'interact'),
     }, opts.initial || {});
 
-    // Open the base dialog (from dialog.js) but wrap body so we can inject mode picker + intercept submit.
+    // Build the dialog shell.
     const backdrop = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === backdrop) close(); } });
     const modal = h('div', { class: 'modal' });
     const header = h('div', { class: 'modal-header' },
@@ -134,42 +131,7 @@
     body.appendChild(alertHost);
     body.appendChild(progress);
 
-    // Declare submitBtn up-front so setMode → updateSubmit can guard on it safely.
     let submitBtn = null;
-
-    // Mode picker
-    body.appendChild(h('div', { class: 'form-group' }, h('label', { text: 'Choose a mode' })));
-    const modes = h('div', { class: 'mode-row' });
-    const modeInteract = h('label', { class: 'mode-card selected' },
-      h('h3', { text: '🕹️  Interact live (no code)' }),
-      h('p', { text: 'Interpret the DDL at runtime. Browse, create, edit, delete rows with generic UI. Switch credentials anytime.' })
-    );
-    const modeGenerate = h('label', { class: 'mode-card' },
-      h('h3', { text: '📦  Generate a standalone webapp' }),
-      h('p', { text: 'Write files to disk (Express backend + frontend). Run independently with npm install && npm start.' })
-    );
-    const interactRadio = h('input', { type: 'radio', name: 'mode', value: 'interact', style: 'display:none' });
-    const generateRadio = h('input', { type: 'radio', name: 'mode', value: 'generate', style: 'display:none' });
-    interactRadio.checked = initialValues._mode === 'interact';
-    generateRadio.checked = initialValues._mode === 'generate';
-    modeInteract.onclick = () => { setMode('interact'); };
-    modeGenerate.onclick = () => { setMode('generate'); };
-    modeInteract.appendChild(interactRadio);
-    modeGenerate.appendChild(generateRadio);
-    modes.appendChild(modeInteract);
-    modes.appendChild(modeGenerate);
-    body.appendChild(modes);
-    let mode = interactRadio.checked ? 'interact' : 'generate';
-    function setMode(m) {
-      mode = m;
-      interactRadio.checked = (m === 'interact');
-      generateRadio.checked = (m === 'generate');
-      modeInteract.classList.toggle('selected', m === 'interact');
-      modeGenerate.classList.toggle('selected', m === 'generate');
-      outputWrap.style.display = (m === 'generate') ? '' : 'none';
-      overWrap.style.display    = (m === 'generate') ? '' : 'none';
-      if (submitBtn) updateSubmit();
-    }
 
     // Fields
     const hostInput = addField(body, 'hostname', 'Hostname', 'text', initialValues.host, 'localhost or db.example.com');
@@ -185,29 +147,20 @@
     const adv = h('details', { class: 'advanced' });
     adv.appendChild(h('summary', { text: 'Advanced options' }));
     const schemaInp = addField(adv, 'schema', 'Postgres schema', 'text', initialValues.schema, 'Usually "public"');
-    const outputWrap = h('div');
-    const outputInp = addField(outputWrap, 'output', 'Output directory (Generate only)', 'text', initialValues.output, 'Relative to project root or absolute');
-    adv.appendChild(outputWrap);
     const cbWrap = h('div', { style: 'margin-top:10px' });
-    const overCB = h('input', { type: 'checkbox', id: 'f-overwrite' });
-    overCB.checked = !!initialValues.overwrite;
     const sslCB = h('input', { type: 'checkbox', id: 'f-ssl' });
     sslCB.checked = !!initialValues.ssl;
-    const overWrap = h('label', { class: 'check-row', style: 'display:flex;align-items:center;gap:8px;' }, overCB, ' Overwrite existing output directory contents (Generate only)');
-    const sslWrap  = h('label', { class: 'check-row', style: 'display:flex;align-items:center;gap:8px;margin-top:6px;' }, sslCB, ' Require SSL (PGSSLMODE=require)');
-    cbWrap.appendChild(overWrap);
+    const sslWrap  = h('label', { class: 'check-row', style: 'display:flex;align-items:center;gap:8px;' }, sslCB, ' Require SSL (PGSSLMODE=require)');
     cbWrap.appendChild(sslWrap);
     adv.appendChild(cbWrap);
     body.appendChild(adv);
-    setMode(mode);
 
     const resultHost = h('div');
     body.appendChild(resultHost);
 
     footer.appendChild(h('button', { type: 'button', class: 'btn', onclick: close, text: 'Cancel' }));
-    submitBtn = h('button', { type: 'button', class: 'btn btn-primary', onclick: onSubmit });
+    submitBtn = h('button', { type: 'button', class: 'btn btn-primary', onclick: onSubmit, text: 'Connect' });
     footer.appendChild(submitBtn);
-    updateSubmit();
 
     function addField(container, id, label, type, val, hint, required) {
       const g = h('div', { class: 'form-group' });
@@ -250,19 +203,14 @@
         user: userInput.value.trim(),
         password: passInput.value,
         schema: schemaInp.value.trim() || 'public',
-        output: outputInp.value.trim() || 'generated-webapp',
-        overwrite: overCB.checked,
         ssl: sslCB.checked,
       };
     }
-    function updateSubmit() {
-      submitBtn.textContent = (mode === 'interact') ? 'Connect & Interact' : 'Connect & Generate';
-    }
-    function setSubmitting(state) {
-      submitBtn.disabled = !!state;
-      submitBtn.innerHTML = state
-        ? '<span class="spinner"></span><span>' + ((mode === 'interact') ? 'Connecting…' : 'Generating…') + '</span>'
-        : ((mode === 'interact') ? 'Connect & Interact' : 'Connect & Generate');
+    function setSubmitting(submitting) {
+      submitBtn.disabled = !!submitting;
+      submitBtn.innerHTML = submitting
+        ? '<span class="spinner"></span><span>Connecting…</span>'
+        : 'Connect';
     }
     async function onSubmit() {
       resultHost.innerHTML = '';
@@ -278,7 +226,6 @@
       localStorage.setItem('pg.db', p.database);
       localStorage.setItem('pg.user', p.user);
       localStorage.setItem('pg.schema', p.schema);
-      if (mode === 'generate') localStorage.setItem('pg.output', p.output);
       try {
         localStorage.setItem('pg.lastConnection', JSON.stringify(p));
       } catch (_) {}
@@ -286,41 +233,23 @@
       setSubmitting(true);
       setProgress(15, true);
       try {
-        if (mode === 'interact') {
-          setProgress(45, true);
-          const res = await api('POST', '/api/interpreter/connect', p);
-          setProgress(100, true);
-          state.connectionId = res.connectionId;
-          state.connection = res.connection;
-          localStorage.setItem('pg.connId', state.connectionId);
-          setAlert('success', 'Connected',
-            `Connected as ${res.connection.user}@${res.connection.host}:${res.connection.port}/${res.connection.database} — ${res.schemaTables.length} table(s) in schema ${res.connection.schema}.`);
-          setProgress(0, false);
-          setTimeout(() => { close(); afterInteractConnect(); }, 700);
-        } else {
-          setProgress(35, true);
-          const res = await api('POST', '/api/generate', p);
-          setProgress(100, true);
-          if (!res.ok) throw new Error(res.error || 'Failed');
-          setAlert('success', 'Webapp generated successfully!',
-            `${res.totalTables} table(s) → ${res.totalFiles} files written to ${res.relativeOutputDir || res.outputDir}`);
-          const r = h('div', { class: 'modal-body result-card', style: 'margin-top:14px;background:rgba(13,17,23,0.6);border:1px solid var(--color-border);border-radius:8px;padding:14px;' });
-          r.appendChild(h('h4', { style: 'margin:0 0 8px;font-size:14px;', text: 'Run it' }));
-          r.appendChild(h('code', {
-            style: 'display:block;background:#0d1117;padding:8px 10px;border-radius:6px;border:1px solid var(--color-border);margin-top:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#c9d1d9;white-space:pre-wrap;word-break:break-all',
-            text: (res.nextSteps || []).join('\n')
-          }));
-          resultHost.appendChild(r);
-          setProgress(0, false);
-        }
+        setProgress(45, true);
+        const res = await api('POST', '/api/interpreter/connect', p);
+        setProgress(100, true);
+        state.connectionId = res.connectionId;
+        state.connection = res.connection;
+        localStorage.setItem('pg.connId', state.connectionId);
+        setAlert('success', 'Connected',
+          `Connected as ${res.connection.user}@${res.connection.host}:${res.connection.port}/${res.connection.database} — ${res.schemaTables.length} table(s) in schema ${res.connection.schema}.`);
+        setProgress(0, false);
+        setTimeout(() => { close(); afterInteractConnect(); }, 700);
       } catch (e) {
         setProgress(0, false);
         if (e && (e.status === 401 || e.code === 'NO_CONN')) {
           // Shouldn't happen on connect but handle anyway.
         }
         setAlert('danger',
-          ((e && e.code === 'VALIDATION') || (e && e.status === 400)) ? 'Please fix the form' :
-          (mode === 'interact' ? 'Could not connect to Postgres' : 'Failed'),
+          ((e && e.code === 'VALIDATION') || (e && e.status === 400)) ? 'Please fix the form' : 'Could not connect to Postgres',
           (e && e.message) || String(e), e);
         if (e && /password/i.test(e.message || '') || (e && e.code === '28P01') || (e && e.code === '28000') || (e && e.hints && e.hints.some(x => /password/i.test(x)))) {
           passInput.style.borderColor = 'var(--color-danger)';
@@ -341,8 +270,8 @@
     });
 
     document.body.appendChild(backdrop);
-    setTimeout(() => { (mode === 'generate' ? outputInp : dbInput).focus(); }, 20);
-    return { close, open: () => null, getMode: () => mode };
+    setTimeout(() => { dbInput.focus(); }, 20);
+    return { close, open: () => null };
   }
 
   // ---------- Top-level flow ----------

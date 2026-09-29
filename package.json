@@ -1,22 +1,18 @@
 {
-  "name": "pg-webapp-generator",
+  "name": "pg-ddl-interpreter",
   "version": "1.0.0",
-  "description": "Generator that creates a standalone CRUD webapp from a PostgreSQL DDL/schema",
-  "main": "generator.js",
-  "bin": {
-    "pg-webapp-generator": "./generator.js"
-  },
+  "description": "Live PostgreSQL DDL interpreter with generic CRUD UI and always-available credential re-entry.",
+  "main": "server.js",
   "scripts": {
-    "generate": "node generator.js",
-    "start": "node generator-ui.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "pg": "^8.12.0",
-    "yargs": "^17.7.2"
+    "pg": "^8.12.0"
   }
 }

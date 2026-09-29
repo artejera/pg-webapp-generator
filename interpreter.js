@@ -2,7 +2,26 @@
 
 const crypto = require('crypto');
 const { Pool } = require('pg');
-const { quoteIdent, classifyColumnType } = require('./src/generator/schemaExtractor');
+
+function quoteIdent(name) {
+  return '"' + String(name).replace(/"/g, '""') + '"';
+}
+
+function classifyColumnType(col) {
+  const udt = (col.udtName || '').toLowerCase();
+  const dt = (col.dataType || '').toLowerCase();
+  const combined = dt + ':' + udt;
+  if (/bool/.test(combined)) return 'boolean';
+  if (/(int|serial|oid)/.test(combined)) return 'integer';
+  if (/(numeric|decimal|float|double|real)/.test(combined)) return 'number';
+  if (/(json|jsonb)/.test(combined)) return 'json';
+  if (/(bytea|blob)/.test(combined)) return 'binary';
+  if (/(date|time|timestamp|interval)/.test(combined)) return 'datetime';
+  if (/(uuid)/.test(combined)) return 'uuid';
+  if (/(text|char|cidr|inet|macaddr|xml|name|money)/.test(combined)) return 'text';
+  if (/(array)/.test(combined)) return 'json';
+  return 'text';
+}
 
 function coerceForPg(v) {
   if (v === null || v === undefined) return null;
