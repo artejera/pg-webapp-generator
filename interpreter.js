@@ -83,6 +83,17 @@ function maskPassword(conn) {
   };
 }
 
+async function listSchemas(pool) {
+  const res = await pool.query(
+    `SELECT schema_name
+       FROM information_schema.schemata
+      WHERE schema_name NOT LIKE 'pg_%'
+        AND schema_name NOT IN ('information_schema')
+      ORDER BY schema_name`
+  );
+  return res.rows.map(r => r.schema_name);
+}
+
 async function extractSchemaLive(pool, schemaName) {
   const tablesRes = await pool.query(
     `SELECT table_schema, table_name
@@ -279,6 +290,11 @@ async function connectAndStore(payload) {
     throw classifyConnectionError(err);
   }
 
+  let availableSchemas;
+  try { availableSchemas = await listSchemas(pool); }
+  catch (err) { availableSchemas = [schema]; }
+  if (!availableSchemas.length) availableSchemas = [schema];
+
   let schemaObj;
   try {
     schemaObj = await extractSchemaLive(pool, schema);
@@ -297,9 +313,34 @@ async function connectAndStore(payload) {
     createdAt: new Date().toISOString(),
     host, port, database, user, password, schema, ssl,
     pool,
+    availableSchemas,
     schemaObj,
   };
   connections.set(id, conn);
+  return conn;
+}
+
+async function switchSchema(conn, schemaName) {
+  if (!conn) {
+    const e = new Error('No active connection.');
+    e.status = 401; e.code = 'NO_CONN'; throw e;
+  }
+  const s = String(schemaName || '').trim();
+  if (!s) {
+    const e = new Error('Schema name is required.');
+    e.status = 400; e.code = 'VALIDATION'; throw e;
+  }
+  try {
+    conn.schemaObj = await extractSchemaLive(conn.pool, s);
+  } catch (err) {
+    const e = new Error(err && err.message ? err.message : String(err));
+    e.status = 400;
+    e.code = (err && err.code) || 'SCHEMA_EXTRACT';
+    if (err && err.detail) e.detail = err.detail;
+    throw e;
+  }
+  conn.schema = s;
+  try { conn.availableSchemas = await listSchemas(conn.pool); } catch (_) {}
   return conn;
 }
 
@@ -559,6 +600,7 @@ async function disconnect(connId) {
 
 module.exports = {
   connectAndStore,
+  switchSchema,
   requireConnection,
   findConnection,
   tableMeta,

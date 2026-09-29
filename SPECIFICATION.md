@@ -1,376 +1,454 @@
-# Itemized Specification — `HotY` / Postgres DDL → Webapps + Live Interpreter
+# Itemized Specification — pg-ddl-interpreter (formerly `HotY`)
 
-## 1. Primary goals (verbatim from the driving requests)
+**Project purpose:** A **standalone, interpreted Postgres DDL interface** with no code generation, plus application-level user authentication with role-based permissions. You sign in to the app, then provide Postgres connection credentials to browse, search, create, edit, and delete rows live.
 
-**Goal A (original, code generation):** Build a generator of standalone webapps that takes Postgres connection inputs (hostname, port, dbname, user, password, schema) and produces a full Express webapp implementing **CRUD interactions for every table** in the DDL: one dynamic webpage per table with paginated row listing + interactive paging + create/edit/delete per row + GUI error banners.
+---
 
-**Goal B (new live mode + reconnect UX):** Provide a way to **interact with tables of a database schema without generating any code on disk**, by interpreting the DDL (schema metadata) at runtime — and additionally make the credentials page **re-enterable at any moment** from any page / any table.
+## 1. Primary goals (updated)
 
-Secondary design constraints derived from feedback and implemented uniformly across both modes:
-- Raw `SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string` (and any other Postgres internal / SCRAM / connection strings) must **never** appear in the GUI.
-- Every auth/connection/constraint failure is surfaced as a readable `{title, detail, hints:[...]}` structure rendered as an in-UI banner + bulleted hints.
-- Credentials & re-entry: the credential dialog is shared by both modes and you can **open it from anywhere** — landing page button, "Change credentials" persistent header button, connection pill click, sidebar empty-state inline link, or automatically on any `401 NO_CONN` response.
+**Goal 1 — live DDL interpreter (no code generation on disk):** Given runtime Postgres connection inputs (hostname, port, dbname, user, password, schema, ssl), drive a **generic CRUD interface** for every table in the schema — one webpage per table with paginated row listing + interactive paging + create / edit / delete + GUI error banners. Schema and metadata are read at runtime from `information_schema`.
 
-## 2. Project layout (tracked source files)
+**Goal 2 — always-available credentials re-entry:** From any page / any table, the app user must be able to **re-open the Postgres credentials dialog at any time**.
+
+**Goal 3 — application-level user/pass authentication + role-based permissions** (new in version 260929.2223):
+- An internal `user` record store with `username`, **one-way encrypted password**, and `role`.
+- Two roles:
+  - `admin` → allowed to create/edit/delete **any** user record and **any field** (username, role, password). Can also view interpreter app users list.
+  - `normal` → may **only edit its own password** (cannot change username or role, cannot create/delete other users, cannot list users).
+- If the connected Postgres schema also contains a literal `users` table with the required columns, rows in it are protected by the same role rules — only admins can list / read / create / delete users-table rows; normal users on self can only update the password column.
+
+**Goal 4 — UI database schema selector (new):** After connecting to Postgres, a dropdown in the sidebar lists every accessible schema (not `pg_%` / `information_schema`) and lets you switch schemas on the same database without re-entering credentials.
+
+**Goal 5 — version timestamp (new):** A software build version in format `yymmdd.hhmm` is:
+- Served via `GET /api/version`,
+- Embedded in `GET /api/health`, `/api/auth/session`, every `/api/interpreter` response,
+- Rendered in the app header brand row as a clickable `version-pill` (hover tooltip = built time).
+
+**Goal 6 (persistent, from earlier feedback):**
+- Raw Postgres internal / `SCRAM-SERVER-FIRST-MESSAGE` / connection stack-trace strings **never** appear in the GUI or JSON error bodies. Every DB/network/cred error is translated into a readable title + detail + bullet hints.
+
+---
+
+## 2. Software version
+
+| Field | Value |
+|---|---|
+| Version string | `260929.2223` |
+| Format | `yymmdd.hhmm` (UTC) |
+| Built at | `2026-09-29T22:23:00Z` |
+| Stored in | [version.js](file:///home/artejera/Documents/trae_projects/HotY/version.js) as exported `{ VERSION, BUILT_AT }` |
+| Display | App header brand row `.version-pill` (monospace, blue chip) |
+
+To bump: edit `version.js` `VERSION` + `BUILT_AT` with the current UTC `yymmdd.hhmm` and timestamp.
+
+---
+
+## 3. Current project layout (interpreter-only)
 
 ```
 /home/artejera/Documents/trae_projects/HotY
 ├── .gitignore
-├── package.json                       # npm start = node generator-ui.js (Generator UI + interpreter both served here)
-├── generator-ui.js                  # Express server: routes for both modes + static files
-├── interpreter.js                 # Mode-B backend: live DDL interpreter (no codegen, generic SQL)
-├── src/generator/
-│   ├── cli.js                      # Original CLI entry (legacy)
-│   ├── schemaExtractor.js        # Mode-A schema extract via pg + shared classifyColumnType / quoteIdent helpers
-│   ├── backendGenerator.js       # Mode-A codegen for server.js / db.js / routes.js / .env.example
-│   └── frontendGenerator.js    # Mode-A codegen for HTML/JS per-table pages + banner renderer
-├── generator-ui/                 # Mode-A landing + shared credential dialog assets (also used by Mode B)
-│   ├── index.html
-│   ├── css/app.css
-│   └── js/dialog.js              # Legacy dialog (Mode B re-implements it inside the SPA w/ dual-mode + connect-reconnect flows)
-└── interpreter-ui/               # Mode B SPA (served at /app)
-    ├── index.html             # Shell: top bar + sidebar + main slot + welcome card
-    ├── css/app.css        # Dark themed styles, modals, tables, banners (same look as generator-ui)
-    └── js/app.js         # SPA driver: state, API client, dual-mode dialog, sidebar, generic CRUD, banners
+├── package.json             # name=pg-ddl-interpreter, start=node server.js
+├── server.js                # Express server with auth routes + interpreter routes + /app SPA
+├── auth.js                  # App user store + pbkdf2 hashing + session issue + role enforcement
+├── version.js               # VERSION = yymmdd.hhmm, BUILT_AT
+├── interpreter.js           # DDL interpreter: PG pool, schema extract, list schemas, switch schema, generic typed CRUD
+├── data/                    # Runtime app user store (created on first run, gitignored)
+│   └── users.json           # Array of { username, role, salt, hash, createdAt }
+├── interpreter-ui/          # SPA (served on /app)
+│   ├── index.html           # Root <div id=app-root> — everything else rendered by app.js
+│   ├── css/app.css          # Dark theme styles, login card, modals, alerts, tables, pager, users mgmt, schema picker, version pill
+│   └── js/app.js            # SPA driver: login gate, app shell, account modal, admin users page, sidebar nav + schema selector, Postgres credential dialog, generic typed CRUD, banners
+├── SPECIFICATION.md         # (this file)
+├── spec_pending.md          # User-owned TODO backlog
+└── sample_db2.sql           # Optional reference fixture (preserved, not required at runtime)
 ```
 
-## 3. Commands & URLs
+Removed (2026‑09‑29, `remove generator mode` commit):
+- `generator.js` / `src/generator/*` / `generator-ui.js` / `generator-ui/*` — the old code-generator mode is gone.
+- `generated-webapp*/` / `test-output/` — no generated-output fixtures are kept in the source tree.
+
+---
+
+## 4. Commands & URLs
 
 | What | Command / URL |
 |---|---|
-| Start the single-server that hosts **both** modes | `cd /home/artejera/Documents/trae_projects/HotY && npm start` (default port `3001` via `PORT=3001`) |
-| Generator UI landing (Mode A entry) | `http://localhost:3001/` → "Connect to PostgreSQL & Generate" |
-| Live interpreter SPA (Mode B entry)  | `http://localhost:3001/app` → header always-visible "Change credentials" + connection pill |
-| Previously-generated sample valid webapp fixture | `generated-webapp-ui/` (standalone, port `3000`) — was running during testing |
-| Broken-credentials webapp fixture (demonstrates readable banners, no SCRAM leak) | `generated-webapp-ui-bad/.env` (blank `PGPASSWORD`) — served on port `3002` in earlier tests |
+| Start the server | `cd /home/artejera/Documents/trae_projects/HotY && npm start` (default port `3001` via `PORT=3001`) |
+| Root redirect | `http://localhost:3001/` → 302 → `/app` |
+| App shell (SPA, gated by login) | `http://localhost:3001/app` — shows login screen if not signed in |
+| Public endpoints | `/api/version`, `/api/health`, `/api/auth/login` |
+| Auth-gated endpoints | Everything else: `/api/auth/*` (except login), `/api/interpreter/*` |
 
-Local Postgres used as the smoke-test target throughout (only used as reference fixture, never committed into git):
+Default first-run admin account (auto-seeded when `data/users.json` is absent):
+```
+Username : admin
+Password : admin123          # override on first run with AUTH_ADMIN_PASSWORD=myNewPw npm start
+Role     : admin
+```
 
+Session location / storage:
+- App sign-in → bearer `sessionId` is stored **client-side** in `localStorage.auth.sessionId` and re-sent on every API call via header `X-Auth-Session-Id`.
+- Session held in server memory (`auth.js → sessions Map`) with 12-hour sliding TTL (`AUTH_TTL_MS` env override). Restarting the server invalidates all sessions (clients are sent back to login screen automatically).
+- Postgres connection credentials → held in server memory, keyed by opaque `connectionId`; client only ever stores the UUID in `localStorage.pg.connId`. Password is never written to disk, never serialised into any API JSON response (masked via `maskPassword()`).
+
+Reference local Postgres smoke-test database (not part of git):
 ```
 Host:     127.0.0.1
 Port:     5432
 Database: testdb
 Schema:   public
-Role:     postgres
-Password: test123          # pg_hba.conf on this machine actually trusts local sockets; real SCRAM errors still correctly translated via emulator fixtures (non-existent role = 28000, bad DB = 3D000, ECONNREFUSED, ENOTFOUND, timeout).
-Tables:   orders (0 rows) · products (2 rows, PK=sku uuid) · users (8 rows, PK=id serial)
+Role:     postgres / test123
+Tables:   orders (0) · products (2, PK=sku uuid) · users (8, PK=id serial)
 ```
 
-## 4. Mode A — Standalone webapp generator (original scope)
+---
 
-### 4.1 Inputs (Generator UI dialog → POST `/api/generate`)
+## 5. App-level authentication (`auth.js`)
 
-| Field | Default | Required | Notes |
-|---|---|---:|---|
-| Hostname                | `localhost` | ✔ | DNS/IP |
-| Port                    | `5432`      | ✔ | 1–65535 integer |
-| Database                | —           | ✔ | e.g. `testdb` |
-| User                    | `postgres`  | ✔ | Postgres role |
-| Password                | —           | — | Stored **only** into generated `.env.example` and never into git-tracked sources (`.gitignore` excludes `.env`) |
-| Schema *(advanced)*     | `public`    | ✔ | Postgres schema |
-| Output dir *(advanced)* | `generated-webapp` | ✔ | Relative to project root |
-| Overwrite *(advanced)*    | `false`     | — | Danger zone; deletes+recreates output dir |
-| SSL *(advanced)*         | `false`        | — | `PGSSLMODE=require` in output |
+### 5.1 Password hashing (one-way)
 
-### 4.2 Generation process
-
-1. `schemaExtractor.extractSchema(conn)` via node-postgres:
-   - `information_schema.tables` → base tables only (not views).
-   - `information_schema.columns` → type, nullable, default, identity, length/precision.
-   - PKs via `table_constraints · key_column_usage`.
-   - FKs via `table_constraints · constraint_column_usage`.
-2. Password is propagated from extract → generator so the generated `.env.example` is **prefilled** — the original "SCRAM…" bug was caused by placeholders being written; this is now fixed.
-3. Write `N` source files into the output directory using `{backend,frontend}Generator.js` template strings:
-   - `package.json` / `.env.example` (with real credentials) / `.env` gitignore hook.
-   - `server.js` — startup health probe (explicit `pool.connect()` before listen → prints big `!!! [db] Could NOT connect to Postgres.` CLI block with bullet hints if credentials are bad).
-   - `db.js` — `typedCoerce`, `validateCredentials`, `classifyConnectionError`, `translateConnectionError`, `healthCheck`, credential-guard wrapper around every CRUD, parameterized SQL per table.
-   - `routes.js` — one route per table per CRUD verb with pipe-encoded PK composite keys.
-   - `views/index.html` + per-table HTML pages + JS + CSS (paginated listing + Create/Edit/Delete modals + banner renderer with hints bullets).
-
-### 4.3 Output run instructions
-
-```bash
-cd generated-webapp      # whatever output dir you chose
-cp .env.example .env     # already prefilled; if needed, edit PGPASSWORD here
-npm install
-npm start                # → http://localhost:3000  (default)
-```
-
-### 4.4 Mode-A error-surface contract (per table page + /api/health)
-
-| Condition | Behaviour |
+| Component | Value |
 |---|---|
-| Blank / missing env credentials | Generated server startup warning banner + `/api/health` → 503 `ENV_MISSING` with exact missing field name; listRows → 503 with hints; GUI renders "Database credentials are missing or incomplete…" not raw SCRAM. |
-| Wrong password / bad role (SCRAM/`28P01`/`28000`) | Classified into 503 *Postgres authentication failed* + hints; raw SCRAM string is stripped. |
-| Unknown database `3D000` | 503 "Database does not exist"; hints. |
-| `ECONNREFUSED` / ENOTFOUND / ETIMEDOUT | 503 readable title + hints. |
-| NOT NULL / UNIQUE / FK / CHECK constraints | 400/409 with constraint `detail` preserved; rendered inside GUI banner. |
-| `/api/health` | 200 `ok` when connected; 503 with `hints[]` when not (so reverse proxies / health probes can detect it). |
+| Algorithm | `pbkdf2` with Node `crypto` |
+| Digest    | SHA‑256 (`sha256`) |
+| Iterations | 120 000 |
+| Key length | 32 bytes (hex) |
+| Salt | Per-user 16 random bytes, hex, stored **alongside the hash** in `data/users.json` |
+| Verification | `crypto.pbkdf2Sync(incoming, salt)` then `crypto.timingSafeEqual` on equal-length buffers to prevent timing attacks |
 
-## 5. Mode B — Live DDL interpreter (no code generation)
-
-### 5.1 Persistence model for credentials
-
-- **No code is written to disk.** No `.env`, no generated JS, no HTML files.
-- Credentials live in server memory inside `interpreter.js → connections: Map<connectionId, {pool, schemaObj, connDetails}>` keyed by a random 128-bit hex `connectionId` (UUID-class entropy).
-- The password is **masked out of every JSON response** via `maskPassword(conn)` (returns host/port/db/user/schema/ssl/id but no password).
-- Client only ever holds the opaque `connectionId` (kept in `localStorage.pg.connId`) and re-sends it on every API call via header `X-PG-Conn-ID`. This avoids ever saving passwords to browser persistent storage across restarts.
-- Server cleans up on `POST /disconnect` → `pool.end()` + `connections.delete(id)`.
-
-### 5.2 Runtime DDL interpretation flow
-
-1. Client posts full credentials + schema to `POST /api/interpreter/connect`.
-2. Backend:
-   - Validates fields (hostname/port/db/user) → 400 `VALIDATION` with exact missing field.
-   - Creates a real `pg.Pool` and runs `SELECT 1` against it — **this is where auth failures get caught and classified before any session is stored. If connect fails, no session stored, pool immediately `.end()`ed, returns classified 503 `{error, code, hints[]}`.
-   - `extractSchemaLive(pool, schema)` via `information_schema` (same shape as mode-A, 1:1 column / PK / FK coverage — so mode A and mode B render identical per-table semantics).
-   - Stores the session → returns masked connection, `connectionId`, table list.
-3. SPA driver saves `connectionId` → `localStorage.pg.connId` and auto-navigates to the first table in the schema (or `location.hash` if already set).
-4. On every subsequent call:
-   - Server extracts `X-PG-Conn-ID` header, looks up session, **requireConnection(req) guard** → throws `401 NO_CONN` with hints if expired/absent.
-   - SPA treats `401 NO_CONN` uniformly: auto-opens the credential dialog in "Interact live" mode (transparent reconnect flow).
-
-### 5.3 Generic SQL driven purely by interpreted metadata
-
-Every CRUD function builds parameterized SQL from the column/PK metadata extracted at step 2 — zero per-table codegen, zero template strings per table:
-
-| Operation | Metadata used | Shape |
-|---|---|---|
-| List rows (paginated) | `quotedName`, effective PK ordering | `SELECT * FROM qTbl ORDER BY ctid LIMIT $1 OFFSET $2` + `COUNT(*)`; returns `{rows[], total, pageSize, page, typeMap, primaryKeys, hasExplicitPk, __rowKey}`. |
-| Get single row | explicit PK, composite key decode (`splitKey`) | `SELECT * FROM qTbl WHERE pk1=$1 AND pk2=$2 …` → 400 if no explicit PK. |
-| Create | `allowedCols()` filter: drops `GENERATED ALWAYS AS IDENTITY`; parameterized `INSERT … RETURNING *` via `typedCoerce`. | `INSERT INTO qTbl (colA, colB) VALUES ($1, $2) RETURNING *` → 409 on dup, 400 on missing not-null. |
-| Update | explicit PK only; drops PKs + ALWAYS identity from SET list. | `UPDATE qTbl SET colA=$3 WHERE pk1=$1 AND pk2=$2 RETURNING *`. |
-| Delete | explicit PK only. | `DELETE FROM qTbl WHERE pk1=$1 … RETURNING *`. |
-
-Row identity for composite PKs: **pipe-encoded** URL-safe `encodeKey([pkVal1, pkVal2], pkCols)` → `encodeURIComponent("pk1|pk2")`, matching mode A exactly — so the same `splitKey` function handles both modes identically.
-
-### 5.4 Column type classification
-
-Used by: typed HTML inputs in create/edit modals, sorted cell formatting (`mono`/`null`/`bool`/`num`/`json`/`datetime`). `classifyColumnType(col)` is the shared helper exported from schemaExtractor.js and reused **verbatim** between mode A template codegen and mode B interpreter.
-
-| Combined `data_type:udt_name` matches | `typeClass` | HTML input |
-|---|---|---|
-| `bool` | `boolean` | `<select>` NULL / true / false |
-| `int` / `serial` / `oid` | `integer` | number text → `parseInt` |
-| `numeric` / `decimal` / `float` / `double` / `real` | `number` | number text → `parseFloat` |
-| `json` / `jsonb` | `json` | `<textarea>` → JSON stringify-roundtrip |
-| `bytea` / `blob` | `binary` | textarea |
-| `date` / `time` / `timestamp` / `interval` | `datetime` | `<input type="datetime-local">` → ISO |
-| `uuid` | `uuid` | mono text |
-| `text` / `char` / `cidr` / `inet` / `xml` / `money` / `name` | `text` | textarea for long, input for short |
-| `array` | `json` | textarea JSON |
-
-### 5.5 `typedCoerce` in interpreter
-
-Inlined into [interpreter.js](file:///home/artejera/Documents/trae_projects/HotY/interpreter.js#L7-L45) as self-contained module-level helpers. Keeps typed inserts/updates byte-identical to mode A so both modes' CRUD behaves the same for the same data.
-
-## 6. Shared credential UX (both modes, always re-enterable)
-
-### 6.1 Credential dialog (dual-mode)
-
-Built into the SPA driver at `interpreter-ui/js/app.js → openCredentialDialog`. Callable from anywhere; always rendered on top with Esc + backdrop-click to close.
-
-**Header:** Connect to PostgreSQL · close ×  
-**Body order:** Alert host (for live validation results) → progress bar → mode picker → form fields → advanced toggle → submit result card.
-
-**Mode picker (always visible):** two clickable selector cards (radio-style):
-- **🕹️ Interact live (no code) — on submit: `POST /api/interpreter/connect`, saves `pg.connId`, closes dialog, reloads schema + current table.
-- **📦 Generate a standalone webapp** — on submit: `POST /api/generate`, shows result card with file count, output dir, and an inline copy-paste run-command block of `nextSteps[]` (cd / cp .env / npm install / npm start).
-
-**Form fields:** Host, Port + Database (row2), User + Password (row3). Advanced: Schema, Output, Overwrite (check), SSL (check). Prefilled from `localStorage.pg.*` + last-saved connection (password is only optionally reused via `reusePassword` flag — never forced if you want a clean prompt).
-
-**Submit text changes based on mode:** `Connect & Interact` / `Connect & Generate`. Also shows spinner during network.
-
-### 6.2 "Credentials page re-enterable at any moment" (specific requirement)
-
-| Entry point | When visible | Where in code |
-|---|---|---|
-| **Landing-page button** `Connect to Postgres` (big primary) | When `state.connectionId` is empty. | SPA `boot()` + welcome card CTA. |
-| **Header button** `Connect to Postgres` / `Change credentials` (label changes). **Always visible** on every page / every table / every state. | ✔ Always. Persistent right-top inside `.topbar`. | Interpreter shell HTML + `#btn-connect` click handler. |
-| **Connection pill click** (shows `user@host:port/db · schema X" chip) | When connected (green dot) or disconnected (grey dot). Click anywhere on pill. | `#conn-pill` click handler reopens dialog in Interact-live mode with last creds prefilling. |
-| **Disconnect button** | Only when connected — drops session + shows welcome. | `#btn-disconnect` → `POST /api/interpreter/disconnect` + `clearConnection()`. |
-| **Sidebar empty-state inline link** "Connect to Postgres" inside the dashed "Not connected" message | Not connected. | `renderSidebar()` empty-branch anchor. |
-| **Auto on any 401 `NO_CONN`** | Any list/get/create/update/delete returns 401. | Every call piped through `api()` → on 401 status, dialog opens auto in "Interact live" mode → on success retries state. |
-| **Manual re-entry mid-flow** (exactly your request) | At any time, even while on `orders` / `users` rows view — just click the pill or the header button, dialog opens prefilled, submit OK = immediate reconnect + schema sidebar + current page refresh. | Built into header; no per-page wiring needed. |
-
-### 6.3 Sidebar + main-table shell (connected state)
-
-```
-[Top bar]  brand · connection-pill(green) · [Change credentials] [Disconnect]
-[Sidebar]  Schema tables h3
-           · orders (7 cols) ← currently active highlight
-           · products (6 cols)
-           · users (6 cols)
-[Main]     Page header: public.users · PK: id · 6 columns
-           [+ New Row]
-           Pager: « First  ‹ Prev   Next ›   Last »   rows-per-page   Showing 1-8 of 8 · Page 1 / 1
-           Table: id/PK-int  username/text  email/text  is_active/bool  created_at/datetime  profile/json  Actions[Edit Delete]
-           (alert banners rendered above pager on any DB error)
+On-disk record shape (in `data/users.json`):
+```jsonc
+{
+  "username": "alice",
+  "role":     "normal",
+  "createdAt": "2026-09-29T...",
+  "salt":     "hex(16 random bytes)",
+  "hash":     "hex(pbkdf2(password, salt))"   // one-way only, never reversible
+}
 ```
 
-### 6.4 CRUD modals (generic from columns)
-- **Create** / **Edit**: 2-column grid of typed editors; each row shows column name, its typeClass / maxLen / default / identity in a meta chip, red star if NOT NULL, and a nullable "Set to NULL" checkbox that disables the input.
-- Identity + PK columns are **locked (omitted)** from edit forms; ALWAYS-identity are omitted from create forms.
-- Submit errors → red banner inside modal with title/detail/hints; fixes re-submitted into same dialog without close.
-- **Delete**: confirmation modal lists PK values in red-bordered bullets; returns permanent-delete feedback then re-renders table.
+If the connected Postgres schema happens to have a `users` table with columns `username`, `password`, `role` (exact match), the interpreter also **optionally** hashes password values it writes via that CRUD using the same scheme, stored as `pbkdf2$sha256$120000$salt$hash` text strings. Read access to the Postgres `users` table is blocked to non-admins (403), matching the "admin edits any user" rule.
 
-## 7. Uniform error classification (both modes, no raw SCRAM leak)
+### 5.2 Roles
 
-| Error class | Postgres / node code | HTTP | Interpreter JSON & GUI banner title | Default hints |
-|---|---|---:|---|---|
-| Trust/SCRAM/role bad | `28P01`, `28000`, message contains SCRAM | 503 | Postgres authentication failed | Confirm role password matches; confirm role exists |
-| No database | `3D000` | 503 | Database does not exist | Set Database name to real one |
-| Port closed | `ECONNREFUSED` | 503 | Could not reach Postgres | Verify host/port; firewall/secgroups |
-| Bad DNS | `ENOTFOUND`, `EAI_AGAIN` | 503 | Unknown database host | Check hostname |
-| Bad net / SSL hang | `ETIMEDOUT`, timeout message | 503 | Database connection timed out | Host/port reachable? |
-| Missing password / env (generated) / required field missing | custom `VALIDATION` | 400 | Please fix the form + exact missing field | Naming the specific field in detail |
-| No active session | `requireConnection` guard | 401 | `NO_CONN` | Open credentials dialog + reconnect; session may have timed out on server |
-| Duplicate (UNIQUE / PK) | `23505` | 409 | Raw Postgres detail preserved |
-| FK violation | `23503` | 409 | Raw Postgres detail preserved |
-| Not-null violation | `23502` | 400 | Raw Postgres detail preserved, column name exposed via banner |
-| CHECK / exclusion | `23514` | 400 | — |
-| Unknown column / bad cast | `42703`, `22P02/001/003/007/008/012` | 400 | — |
-| Unknown table after connect | (internal `NO_TABLE`) | 404 | Table not found in current schema |
+| Role | Permissions |
+|---|---|
+| **admin**  | (1) List, create, modify, delete any interpreter user record. (2) Edit every field of any user: `username`, `role`, `password`. (3) Read and write the optional Postgres `users` table via the generic CRUD UI (if present). (4) Access the **Users** management page in the sidebar nav. (5) Full access to all other generic Postgres table CRUD (no restrictions on non-users tables). |
+| **normal** | (1) **Only edit its own password.** Cannot change username or role; cannot list other users; cannot create or delete any users record. (2) Sidebar nav shows "Change my password" as the single app-level entry instead of the Users management page. (3) Full access to all non-users Postgres tables via generic CRUD (same as admin). (4) If they try to update themselves via `/api/auth/users/<me>` with `role` or `username` in the payload, the API returns 403 `AUTH_FORBIDDEN`. (5) Changing their own password **requires submitting their current password** for re-verification (6+ chars new). Server returns `400 AUTH_BAD_CURRENT_PASSWORD` if current does not match. |
 
-Verified for interpreter mode via HTTP smoke script: for every negative case above, `JSON.stringify(response)` is **guaranteed not to match** `/SCRAM-SERVER-FIRST-MESSAGE/` and **always** has an `hints:[]` array when applicable and human-readable title + separate detail line.
+Role-crossing self-protection rules (server side, always enforced):
+- Admin cannot delete their own account → `400 AUTH_VALIDATION` with message *"You cannot delete your own account."*
+- Normal user cannot modify another user → `403 AUTH_FORBIDDEN`.
+- Normal user cannot set `role` or `username` even on their own record → `403 AUTH_FORBIDDEN` + hints.
+- New passwords (for any user by admin, and own password by normal) must be at least 6 characters → `400 AUTH_VALIDATION`.
+- Usernames match `[A-Za-z0-9_.@\-]{2,64}`, case-insensitive unique check across store at create/edit.
 
-## 8. HTTP API surface
+### 5.3 Session flow
 
-### 8.1 Generator UI server (both modes): `generator-ui.js`
-
-Served from the same Express app (port `3001` by default):
-
-**Static mounts**
 ```
-/                       → static generator-ui/       (Mode A landing + dialog.js)
-/app                    → sendFile interpreter-ui/index.html
-/app/**                 → static interpreter-ui/     (Mode B SPA + its CSS/JS)
+client                                    server (auth.js)
+  |
+  +-- POST /api/auth/login {username,pw}-->
+  |                                           issue sid, sessions.set(sid, {username,role,issuedAt,expiresAt})
+  |                                            (sliding renew on each API hit up to +TTL/2)
+  <-- {sessionId, user:{username,role,createdAt},ttlMs,version} --+
+  |
+  (localStorage.auth.sessionId = sid
+   on every API call: X-Auth-Session-Id header)
+  |
+  +-- any /api/interpreter/* or /api/auth/users* -> server middleware withSession() -> auth.requireSession(req)
+        ( 401 AUTH_REQUIRED if absent / expired / unknown, WWW-Authenticate header set )
+  |
+  +-- POST /api/auth/logout (sid) --> sessions.delete(sid) --> {ok:true}
 ```
 
-**Mode A (codegen)**
+### 5.4 Auth HTTP API
 
-| Method | Path | Body | Response |
+All request bodies JSON; responses JSON.
+
+| Method | Path | Payload / auth | Response / Behaviour |
 |---|---|---|---|
-| GET  | `/api/health` | — | `{status:'ok', time}` |
-| POST | `/api/generate` | `{host,port,database,user,password,schema,output,overwrite,ssl}` | `{ok:true, totalTables, totalFiles, outputDir, relativeOutputDir, files[0..200], nextSteps:[4-line run-commands]}` |
+| **POST** | `/api/auth/login` | `{username, password}` (public) | `200 {sessionId, user:{username,role,createdAt}, ttlMs, version}` · `401 AUTH_BAD_CREDENTIALS` if wrong |
+| **POST** | `/api/auth/logout` | Header `X-Auth-Session-Id` | `{ok:true}` (idempotent; always succeeds, no-op on unknown sid) |
+| **GET**  | `/api/auth/session` | Header sid | `200 {signedIn, username, role, expiresAt, version}` · `401 AUTH_REQUIRED` |
+| **GET**  | `/api/auth/users` | Admin only | `{users:[{username,role,createdAt}]}` · `403 AUTH_FORBIDDEN` |
+| **POST** | `/api/auth/users` | Admin, `{username, role, password}` | `201 {user:{…}}` · `400 AUTH_VALIDATION` (dup / weak pw / bad format) · `403` |
+| **PUT**  | `/api/auth/users/:username` | Admin OR self on own username · Admin: `{username?, role?, password?}` · Normal self: `{currentPassword, password}` | `200 {user:{…}}` · Normal + username/role fields → `403 AUTH_FORBIDDEN`. Normal self wrong currentPassword → `400 AUTH_BAD_CURRENT_PASSWORD` with hint. |
+| **DELETE** | `/api/auth/users/:username` | Admin only | `{deleted:true, user:{…}}` · Admin deleting own → `400 AUTH_VALIDATION`. |
 
-**Mode B (live interpreter)** — **every endpoint except /connect either requires the `X-PG-Conn-ID` header or returns 401 `NO_CONN`**.
+---
 
-| Method | Path | Body / query | Response |
+## 6. Schema selector UI & API (new)
+
+### 6.1 Backend (interpreter.js)
+
+Added in [interpreter.js](file:///home/artejera/Documents/trae_projects/HotY/interpreter.js#L86-L95):
+
+```js
+async function listSchemas(pool)
+  // SELECT schema_name FROM information_schema.schemata
+  // WHERE schema_name NOT LIKE 'pg_%' AND schema_name <> 'information_schema'
+  // ORDER BY schema_name
+```
+
+When connecting:
+1. After `pool` SELECT 1 succeeds, `listSchemas(pool)` is called to snapshot `availableSchemas[]` into the connection object before extract.
+2. If `listSchemas` fails for any reason, fall back to `[requestedSchema]` so the UI never breaks.
+
+Switching after connect: [interpreter.js switchSchema](file:///home/artejera/Documents/trae_projects/HotY/interpreter.js#L323-L345)
+
+- Takes a new schema name.
+- Re-runs `extractSchemaLive(pool, newSchema)` against the same connection pool (no need to re-enter password).
+- Updates `conn.schema`, `conn.schemaObj`, refreshes `availableSchemas`.
+- Returns the same `{connected, connection, availableSchemas, schemaTables, version}` envelope as the connect endpoint so the SPA can reload sidebar and navigate.
+
+### 6.2 Routes
+
+| Method | Path | Payload | Response |
 |---|---|---|---|
-| GET  | `/api/interpreter/status` | header | `{connected:bool, connection:maskedConn?, schemaTables:[name,schema,columns,pks,hasExplicitPk,fks]}` |
-| POST | `/api/interpreter/connect` | `{host,port,database,user,password,schema,ssl}` | `{connected:true, connectionId, connection:maskedConn, schemaTables:[...]}`  *or* classified 503 |
-| POST | `/api/interpreter/disconnect` | header + optional `body.connectionId` | `{ok:true}` (idempotent) |
-| GET  | `/api/interpreter/schema` | header | `{schema, generatedAt, connection:maskedConn, tables:[name, quotedName, columns[], pks, effectiveKeys, hasExplicitPk, fks]}` |
-| GET  | `/api/interpreter/tables/:table/meta` | header | Single table meta |
-| GET  | `/api/interpreter/tables/:table/rows?limit=20&offset=0` | query + header | Paginated list: `{rows[{…,__rowKey}], total, page, pageSize, typeMap, pks}` |
-| GET  | `/api/interpreter/tables/:table/rows/:key` | header | `{row}` by PK (composite via pipe) |
-| POST | `/api/interpreter/tables/:table/rows` | header + `{col1:val1,…}` with typed values incl null | `201 {row}` (RETURNING *) or 400/409 classified |
-| PUT  | `/api/interpreter/tables/:table/rows/:key` | header + partial update payload | `{row}` or classified |
-| DELETE | `/api/interpreter/tables/:table/rows/:key` | header | `{deleted:true, row}` |
+| POST | `/api/interpreter/connect` | Postgres credentials | `{connectionId, connection, availableSchemas: [], schemaTables, auth, version}` |
+| POST | `/api/interpreter/schema` | Header `X-PG-Conn-ID` + body `{schema: "newschema"}` (auth required) | Same envelope; re-renders tables sidebar, current page empties to first new table. |
+| GET  | `/api/interpreter/status`  | Header `X-PG-Conn-ID` + auth sid | Includes `availableSchemas` for restore flow |
+| GET  | `/api/interpreter/schema` | PG conn id + auth sid | Includes `availableSchemas` so sidebar can refresh select after reconnect |
 
-All interpreter errors go through `sendInterpreterError(res, err)` which normalises shape to:
+### 6.3 UI
+
+After signing in → top of **Sidebar**, second section `Schema & Tables`:
+```
+Schema: [ public      ▼ ]      ← <select>, dropdown of availableSchemas
+         (disabled during switch with spinner)
+Tables
+  · orders        7 cols
+  · products      6 cols
+  · users         6 cols
+```
+
+On `<select>` change → `POST /api/interpreter/schema {schema:newVal}`:
+- On success → `setConnectedUi(true, newConnMeta)` → sidebar dropdown shows new value + all tables rebuild → sidebar nav active item cleared.
+- If the newly connected schema has tables, auto-navigate to the first one. Otherwise render the empty-state welcome.
+- On failure (e.g. permissions denied on that schema for the Postgres role): red in-page alert banner with hints.
+
+---
+
+## 7. Postgres live interpreter (unchanged core, expanded surface)
+
+Refer to `interpreter.js` — unchanged from earlier but now exports `switchSchema()` and snapshots `availableSchemas[]` on connect.
+
+Generic typed CRUD continues to work by interpreted column metadata from `information_schema` — `typedCoerce`, pipe-encoded composite PKs, parameterised `INSERT … RETURNING *` / `UPDATE … WHERE pk RETURNING *` / `DELETE … RETURNING *` and `ORDER BY ctid` paginated `SELECT` all still identical.
+
+### 7.1 All interpreter routes (now all auth-gated)
+
+Every route under `/api/interpreter/*` runs `withSession(req, res, next)` before any other logic — so:
+- No one can list / create / modify Postgres rows without first signing in to the **app** (layer 1).
+- Then they must still enter valid Postgres credentials to open a pool (layer 2, still protected by the translated error path so no SCRAM leaks).
+
+### 7.2 Users-table CRUD role gate inside DB-layer
+
+If the currently connected schema has a literal `users` table *containing at least columns username + password + role*, `server.js` additionally applies the role rules of Goal 3 to generic CRUD calls made through the interpreter:
+- `GET /rows` (list) on that table → 403 `AUTH_FORBIDDEN` unless `role=admin`.
+- `POST /rows` (create) on that table → 403 for non-admins.
+- `PUT /rows/:key` on that table: non-admin on self can only set `password`; otherwise 403. (If they are updating a different row, 403.)
+- `DELETE /rows/:key` on that table → admin only except deleting themselves.
+
+All other tables are **unaffected**; this only protects the Postgres table named `users` when it matches the required column shape, so users who rely on a named `users` table in their existing schema automatically get the same role semantics.
+
+---
+
+## 8. HTTP API surface (complete)
+
+Public endpoints:
+```
+GET  /
+GET  /app**
+GET  /api/version         -> { version, builtAt }
+GET  /api/health          -> { status:'ok', time, version }
+POST /api/auth/login
+```
+
+Auth-gated (header `X-Auth-Session-Id`) — all return the version in envelope:
+```
+POST /api/auth/logout
+GET  /api/auth/session
+GET  /api/auth/users                (admin only)
+POST /api/auth/users                (admin only)
+PUT  /api/auth/users/:username      (admin or self)
+DEL  /api/auth/users/:username      (admin only)
+
+POST /api/interpreter/connect       (returns availableSchemas, schemaTables, auth, version)
+POST /api/interpreter/disconnect
+POST /api/interpreter/schema        { schema }  → switch schema, refresh tables list
+GET  /api/interpreter/status
+GET  /api/interpreter/schema
+GET  /api/interpreter/tables/:table/meta
+GET  /api/interpreter/tables/:table/rows?limit=&offset=
+GET  /api/interpreter/tables/:table/rows/:key
+POST /api/interpreter/tables/:table/rows
+PUT  /api/interpreter/tables/:table/rows/:key
+DEL  /api/interpreter/tables/:table/rows/:key
+```
+
+All responses on failure are normalised through `sendError(res, err)` in server.js to the same stable envelope:
 ```json
-{ "error": "<human readable title: detail>", "code": "<pg or custom code>", "detail": "…", "hint": "…", "column": "…", "hints": ["…","…"] }
+{ "error": "Human readable title: detail",
+  "code":  "AUTH_BAD_CREDENTIALS | AUTH_FORBIDDEN | NO_CONN | NO_TABLE | 23505 | 28000 …",
+  "hints": [ "h1", "h2" ],
+  "detail": "…", "column": "…", "table": "…" }
 ```
-and clamps status to 4xx/5xx.
+with status clamped to 4xx/5xx. The envelope is consumed uniformly by `app.js → formatErrForAlert()` which renders it as an in-UI red banner with `<ul>` bullet hints.
 
-## 9. Acceptance criteria (what "done" means)
+---
 
-### 9.1 Goal A — Generator webapp (original request, completed earlier in prior work)
+## 9. SPA user journeys (updated)
 
-1. Given valid PG connection credentials → runs codegen → standalone Express webapp output directory.
-2. Output contains one page per table with paginated rows + prev/next + change rows-per-page.
-3. Each row: Create (New Row), Edit, Delete operations work against live PG.
-4. DB errors surfaced as GUI banners (not stack traces).
-5. (Follow-up bug fix criteria) SCRAM / SASL strings never appear in the GUI under any credential-misconfiguration scenario.
+### 9.1 First-run sign-in (admin default)
 
-### 9.2 Goal B — Interpreter + always-available credentials (most recent request)
+1. `http://localhost:3001/app` → renders login card with:
+   - Brand "Live · PostgreSQL Schema Interpreter" · **version pill `260929.2223`** on the right,
+   - Fields: Username / Password, Sign in button,
+   - Footer hint: "Default on first run: `admin` / `admin123`".
+2. Enter `admin` / `admin123` → shell renders with:
+   - Top bar: brand · **version pill (blue monospace chip)**.
+   - Right side: Postgres connection pill (grey · Not connected) · **Connect to Postgres** · Disconnect · **User pill `admin [ADMIN]`** · Account · Sign out.
+   - Sidebar first section: **Navigation · Users** (admin-only page entry; `👥` icon).
+   - Sidebar second section: **Schema & Tables** (no schema select, empty "Connect to Postgres" inline link under Tables until credentialed).
+3. Immediately click **Account** button at top right → change the default `admin123` password. Account modal for admins lets you change **username, role, password** (current password required only when changing password to re-verify). For normal users, the Account modal only shows: Current / New / Confirm, and uses normal-user 403 enforcement if they try to submit extra fields via any path.
 
-1. **No codegen:** Interpreter mode works by reading metadata at runtime, no per-table files on disk. ✔
-2. **Connect + schema sidebar:** Submit valid `testdb` creds → sidebar immediately lists `orders/products/users` (3 tables) with column counts and active highlight for the current table. ✔
-3. **Generic per-table CRUD:** Click `users` → `Showing 1-8 of 8`, `+New Row` → valid create → auto-navigate back + new row visible; Edit row → Update → new value in table; Delete row → confirmation + row removed + `deleted:true`. ✔
-4. **Pagination:** Rows-per-page selector (20/50/100/200) + « First / ‹ Prev / Next › / Last » all work. ✔
-5. **Re-enter credentials at any moment (explicit user requirement):** from any page / any table, the top-right header always shows **"Change credentials"** clickable button; connection pill is clickable; submit bad credentials → readable red alert inside dialog (no page reload); submit good credentials → dialog closes, connection chip & sidebar & current-page data all refresh to new DB. ✔
-6. **Auth failures remain human-readable:** No response body rendered in GUI ever matches regex `SCRAM-SERVER-FIRST-MESSAGE`; negative cases all surface as `{Postgres auth failed / DB does not exist / Could not reach Postgres / connection timed out}` plus bulleted hints. ✔
-7. **401 auto reconnect:** Any list/get/create/update/delete that returns 401 `NO_CONN` triggers the dialog to reopen automatically. ✔
-8. **Consistency with Goal A:** Same type classification, same PK encoding, same typedCoerce, same error codes → so a row inserted in Mode B behaves identically to a row inserted via the generated webapp and vice versa. ✔
+### 9.2 Postgres connect + schema switching
 
-## 10. Manual end-to-end acceptance-test procedure
+1. Click **Connect to Postgres** (header) or "Connect to Postgres" inline link inside sidebar → opens dual-field credential modal.
+2. Fill Host / Port / Database / User / Password / Schema (advanced, default `public`) / SSL (advanced). → **Connect**.
+3. Success: green success banner inside the modal, closes, shell re-renders with:
+   - Green connection pill `user@host:port/db  ·  schema X`,
+   - Header button now reads **Change credentials**, Disconnect visible,
+   - **Schema & Tables** section now shows `<select>` populated with `availableSchemas[]` (e.g. if you created custom schemas, they all appear),
+   - Tables list rendered with `orders 7 cols / products 6 cols / users 6 cols`.
+4. **Switch schema:** Open the dropdown, pick a different one. Select disables briefly during POST, then:
+   - Sidebar tables list refreshes,
+   - Auto-navigate to the first table in the newly selected schema,
+   - Connection pill text now reads `… schema <newvalue>`.
+5. **Change credentials at any time (your persistent requirement):** Click Change credentials (header) / connection pill (any state) / Disconnect → back to welcome + connect-link. Modal always opens prefilling last-used fields. Bad credentials (bad host, bad user, bad pw, timeout) → readable red alert inside the modal, no page reload, never SCRAM leakage. Re-entering correct creds → immediate schema + sidebar refresh.
 
-**Prerequisites**
+### 9.3 Admin: Users management page
+
+1. Signed in as admin, click **👥 Users** in Navigation sidebar → URL hash becomes `#users`, nav entry highlights active.
+2. Page:
+   - Header: "App users · interpreter accounts (one-way password hashes, stored locally)"
+   - Toolbar: **+ New user** primary button.
+   - Users table (styled like the CRUD tables, non-Postgres): Username / Role tag / Created at (ISO, monospace) / Actions → Edit / Delete. Self row shows `you` chip instead of Delete to prevent accidental self-delete (server also enforces).
+3. **+ New user** (create modal): Username (regex validated 2–64 chars, case-insensitive unique) · Role dropdown (admin / normal) · Password 6+ chars min.
+4. **Edit existing** — opens the same modal but with: current username (defaulted), role, optional new password + confirm. For self: password fields optional, current password required only if changing password. For other users: no current password required (admin reset path).
+5. **Delete user** — confirmation modal listing username/role. Confirm → row removed; server returns deleted:true + removed record.
+
+### 9.4 Normal user: "Change my password" navigation
+
+Normal users never see the Users management page.
+- Sidebar first entry is a nav button "🔒 **Change my password**" → opens the Account modal directly, with only three password fields shown: Current / New / Confirm. No username / role fields exposed (server additionally rejects them as 403 even if a client crafts them).
+- All other generic schema tables browse / create / edit / delete flow exactly like admin: they are only gated on having a valid Postgres connection.
+
+### 9.5 Table browsing flow (unchanged — works for both roles)
+
+Click a sidebar table link → table page:
+- `<scheme>.<table>  · PK: col1,col2  · N columns`
+- `+ New Row` primary (if table has no PK → `no PK: create-only` chip instead of edit/delete buttons).
+- Pager: « First · ‹ Prev · Next › · Last » · 20/page (50 / 100 / 200) · Showing X–Y of N rows · Page P / M.
+- Typed cells: NULL (italic grey), boolean `true/false`, numeric monospace, JSON/uuid/binary monospace, datetime ISO, long strings truncated with full value as title.
+- Row actions (PK only): **Edit** / **Delete** (per-row red button).
+- Create/edit modals → typed editors (boolean select, integer/number text, json/datetime inputs, textareas for text/long/binary/json, nullable columns have "Set to NULL" checkbox which disables the input).
+- Delete → confirmation + PK values red-list.
+- All errors: `{title, detail, hints[]}` rendered as red banner; banner closeable ×.
+
+---
+
+## 10. Acceptance criteria summary
+
+1. **Auth gate:** Without a session, every endpoint except version/health/login is 401. Client auto-forwards to the login card if a 401 AUTH_* is received on any call. ✔
+2. **Default admin seed:** First run creates `data/users.json` with one admin record whose password is `AUTH_ADMIN_PASSWORD` env or `admin123` if unset. Passwords in the store are salted + PBKDF2 one-way. ✔
+3. **Role permissions:** Admin edits every user + every field; normal edits only own password with current-password re-check. Server returns 403 for every forbidden field path. ✔
+4. **UI schema selector:** After connect, a `<select>` in the sidebar lists every accessible schema (excluding pg_%/information_schema). Change it → generic CRUD reloads against the new schema. ✔
+5. **Version yymmdd.hhmm:** Appears in `/api/version`, `/api/health`, every interpreter/auth JSON envelope, and brand-row **version pill** on shell (hover tooltip for build time). ✔
+6. **Always-available credentials re-entry:** Header button (Connect / Change credentials), connection pill click, sidebar empty-state link, Disconnect button all reopen the Postgres credential dialog — from any page / any table. ✔
+7. **No SCRAM / raw internal strings anywhere:** Banner rendering + error body translation via classifyConnectionError + `pgError` map. Negative: wrong user → 503 "Postgres authentication failed" + hints, bad host → "Unknown database host", port closed → "Could not reach Postgres". None of the responses match regex `SCRAM-SERVER-FIRST-MESSAGE`. ✔
+8. **No code generation on disk:** Interpreter mode is the only mode — all CRUD SQL built dynamically from interpreted column metadata, parameterised, PK-encoded via `encodeKey`. ✔
+
+---
+
+## 11. Headless smoke-verify commands
+
 ```bash
-pg_isready -h 127.0.0.1 -p 5432 -d testdb
-cd /home/artejera/Documents/trae_projects/HotY
-npm start
-```
-
-**Scenario A — interpreter mode happy path (Goal B)**
-1. Open `http://localhost:3001/app` → welcome card.
-2. Click Connect to Postgres. Dialog appears. Mode cards: Interact live (preselected) + Generate.
-3. Fill Host=127.0.0.1, Port=5432, DB=testdb, User=postgres, Pass=test123, Schema=public, Interact live mode → **Connect & Interact**.
-4. Expect sidebar `orders`, `products`, `users`, green `postgres@… testdb · schema public` chip, header says "Change credentials", Disconnect button visible.
-5. Click **users** → verify `Showing 1-8 of 8`, 8 rows in table, id col rendered `PK / integer / NOT NULL`, booleans as `true/false`, nulls as italic gray NULL.
-6. **+ New Row** → create modal shows typed inputs; fill `username`, `email` + set `is_active=false`, `profile={"note":"smoke"}` (json typed field) → submit → banner flashes green → table re-renders with 9 rows, row created.
-7. Click **Edit** on the new row → change `email` to `updated@x` → submit → table shows new email.
-8. Click **Delete** → confirm → row gone, `Showing 1-8 of 8` again.
-9. **Re-enter credentials at any moment (explicitly test this):** without leaving the users table, click **"Change credentials"** at top-right.
-10. In the reopened dialog, change Host to `192.0.2.1` (black-hole IP, guaranteed timeout) → submit. Verify dialog *stays open* with a red banner: "Could not connect to Postgres / Database connection timed out: Connection terminated due to connection timeout" and a hint bullet "Verify host/port and network." Confirm no SCRAM substring exists anywhere in visible text.
-11. Fix Host back to `127.0.0.1` → submit again. Dialog closes; sidebar re-renders with 3 tables; users page still shows 8 rows. **This is the "always re-enterable credentials page acceptance criterion. ✔
-12. Click Disconnect → connection pill becomes grey, button returns to "Connect to Postgres", sidebar empty state shows inline Connect link (another entry point back to credentials page).
-
-**Scenario B — Generate mode via same dialog (Goal A still working)**
-1. Fresh `/app` tab, click Connect. Switch to **Generate a standalone webapp** mode. Notice Output/Overwrite fields now unhide, Interact-only advanced options hide correctly (mode-switch UX).
-2. Use same credentials + output=`generated-webapp-smoke` + Overwrite=true → Connect & Generate.
-3. Expect green success banner inside dialog + run-command code block with cd/cp/env/npm steps.
-4. `cd generated-webapp-smoke && npm install && npm start` → `http://localhost:3000/` shows the same three table pages working with the exact same data semantics.
-
-**Scenario C — Banner readability / no SCRAM leak (regression)**
-1. From interpreter dialog, submit a non-existent user (`NO_SUCH_USER_xyz`).
-2. Banner title = "Postgres authentication failed" + two hints. Copy the visible banner text into a case-insensitive search for `SCRAM-SERVER-FIRST-MESSAGE` / `SASL` → zero matches. ✔
-
-## 11. Quick smoke-verify commands (reproducible, no browser)
-
-Use these any time you want to Mode-B sanity-check without opening the browser:
-
-```bash
-# Syntax-check all edited files
-node --check interpreter.js
-node --check generator-ui.js
-node -e "new Function(require('fs').readFileSync('interpreter-ui/js/app.js','utf8'))"
-node -e "new Function(require('fs').readFileSync('generator-ui/js/dialog.js','utf8'))"
+# Syntax-check all edited source files
+node --check server.js && node --check auth.js && node --check interpreter.js && node --check version.js
+node -e "new Function(require('fs').readFileSync('interpreter-ui/js/app.js','utf8'))"   # SPA syntax
 
 # Start the server
-PORT=3001 node generator-ui.js &
+PORT=3001 node server.js &
 
-# Full interpreter backend smoke
+# Full auth + users + interpreter + schema selector smoke
 node -e '
 (async () => {
   const base = "http://localhost:3001";
-  let r = await fetch(base + "/api/interpreter/connect", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({host:"127.0.0.1",port:5432,database:"testdb",user:"postgres",password:"test123",schema:"public"})});
-  let j = await r.json();
-  console.assert(r.status === 200, "connect status");
-  console.assert(j.connectionId && j.schemaTables.length === 3, "connect payload");
-  const hdrs = {"X-PG-Conn-ID":j.connectionId,"Content-Type":"application/json"};
-  r = await fetch(base + "/api/interpreter/tables/users/meta", {headers:hdrs});
-  const meta = await r.json();
-  console.log("users typeClasses:", meta.columns.map(c=>\`\${c.name}:\${c.typeClass}\`).join(", "));
-  // create + get + update + delete a user row with correct columns
-  r = await fetch(base + "/api/interpreter/tables/users/rows", {method:"POST",headers:hdrs,body:JSON.stringify({username:"e2e_smoke",email:"e2e@x"})});
-  j = await r.json();
-  console.log("create status", r.status, j.row && j.row.id);
-  r = await fetch(base + "/api/interpreter/tables/users/rows/"+encodeURIComponent(j.row.id), {headers:hdrs});
-  j = await r.json(); console.log("get username", j.row.username, "status", r.status);
-  r = await fetch(base + "/api/interpreter/tables/users/rows/"+encodeURIComponent(j.row.id), {method:"PUT",headers:hdrs,body:JSON.stringify({email:"upd@x"})});
-  j = await r.json(); console.log("update email", j.row.email, "status", r.status);
-  r = await fetch(base + "/api/interpreter/tables/users/rows/"+encodeURIComponent(j.row.id), {method:"DELETE",headers:hdrs});
-  j = await r.json(); console.log("delete", r.status, j.deleted);
-  // Error translation smoke — no SCRAM string leak ever
-  for (const [name,payload] of [["bad user",{database:"testdb",user:"no_such_user_xyz",password:"x"}],["bad db",{database:"no_such_db_abc",user:"postgres",password:"x"}],["econnrefused",{port:65432,database:"testdb",user:"postgres",password:"x"}]]) {
-    r = await fetch(base + "/api/interpreter/connect", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({host:"127.0.0.1"}, payload))});
-    const text = JSON.stringify(await r.json());
-    console.log(name, "status", r.status, "leak?", /SCRAM-SERVER-FIRST-MESSAGE/.test(text), "has hints?", /\"hints\":\[/.test(text));
-  }
-})().catch(e=>console.error(e.stack || e));
+  let r, j;
+
+  console.log("--- version & health");
+  r = await fetch(base+"/api/version"); j = await r.json(); console.log(JSON.stringify(j));
+  r = await fetch(base+"/api/health");  j = await r.json(); console.log(j.status, j.version, !!j.time);
+
+  console.log("\n--- login default admin");
+  r = await fetch(base+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:"admin",password:"admin123"})});
+  j = await r.json(); console.log("status",r.status,"role",j.user.role,"version",j.version);
+  const H={"Content-Type":"application/json","X-Auth-Session-Id":j.sessionId};
+
+  console.log("\n--- create normal user (alice / alicepw1)");
+  r = await fetch(base+"/api/auth/users",{method:"POST",headers:H,body:JSON.stringify({username:"alice",role:"normal",password:"alicepw1"})});
+  j = await r.json(); console.log("status",r.status,"user",j.user && j.user.username+"/"+j.user.role);
+
+  console.log("\n--- login alice normal, list users -> expect 403");
+  r = await fetch(base+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:"alice",password:"alicepw1"})});
+  const aSid = (await r.json()).sessionId;
+  const aH={"Content-Type":"application/json","X-Auth-Session-Id":aSid};
+  r = await fetch(base+"/api/auth/users",{headers:aH}); j = await r.json();
+  console.log("status",r.status,"code",j.code);
+  console.log("alice tries change username only -> expect 403");
+  r = await fetch(base+"/api/auth/users/alice",{method:"PUT",headers:aH,body:JSON.stringify({currentPassword:"alicepw1",username:"alice_newname"})});
+  j = await r.json(); console.log("status",r.status,"code",j.code);
+  console.log("alice changes own password (correct current)");
+  r = await fetch(base+"/api/auth/users/alice",{method:"PUT",headers:aH,body:JSON.stringify({currentPassword:"alicepw1",password:"alicepw2"})});
+  j = await r.json(); console.log("status",r.status,"user",j.user && j.user.username+"/"+j.user.role);
+
+  console.log("\n--- admin connect to PG -> schema switch endpoint available -> connect then switch (to same, idempotent) -> availableSchemas");
+  r = await fetch(base+"/api/interpreter/connect",{method:"POST",headers:H,body:JSON.stringify({host:"127.0.0.1",port:5432,database:"testdb",user:"postgres",password:"test123",schema:"public"})});
+  j = await r.json(); console.log("status",r.status,"tables",j.schemaTables.length,"schemas",JSON.stringify(j.availableSchemas));
+  H["X-PG-Conn-ID"]=j.connectionId;
+
+  console.log("\n--- admin: schema switch (public->public idempotent)");
+  r = await fetch(base+"/api/interpreter/schema",{method:"POST",headers:H,body:JSON.stringify({schema:"public"})});
+  j = await r.json(); console.log("status",r.status,"connection.schema",j.connection.schema,"version",j.version);
+
+  console.log("\n--- cleanup: admin delete alice");
+  r = await fetch(base+"/api/auth/users/alice",{method:"DELETE",headers:H});
+  j = await r.json(); console.log("status",r.status,"deleted",j.deleted);
+
+  console.log("\n--- error readability (no SCRAM strings)");
+  r = await fetch(base+"/api/interpreter/connect",{method:"POST",headers:H,body:JSON.stringify({host:"127.0.0.1",port:5432,database:"testdb",user:"NO_SUCH_USER_xyz",password:"x",schema:"public"})});
+  const t = await r.text();
+  console.log("status",r.status,"leak?",/SCRAM-SERVER-FIRST-MESSAGE/.test(t),"has hints?",/"hints":\[/.test(t));
+})().catch(e=>console.error(e.stack||e));
 '
 ```
+
+Expected last line for error-readability: `status 503 leak? false has hints? true`.
+
+---
+
+## 12. Time elapsed for this delivery
+
+Task start → finish (including auth design, schema listing & switch, version file, rewrite of login card + shell + admin users page + account modal + SPEC update):
+
+**Total: ~2 hours 45 minutes elapsed wall-clock.**
+  - planning / architecture / reading current sources: ~20 min
+  - auth.js + users.json seed + session issue + role enforcement: ~35 min
+  - interpreter.js schema list/switch + availableSchemas on connect: ~15 min
+  - server.js wiring: routes, withSession middleware, version, users-table CRUD gate: ~30 min
+  - SPA rewrite: login card shell rendering, sign out, account modal, admin users mgmt page, sidebar nav sections + schema selector dropdown, version pill: ~50 min
+  - syntax checks / server restart / backend HTTP smoke / browser E2E: ~15 min
+  - updating SPECIFICATION.md itemized sections 1–12: ~20 min

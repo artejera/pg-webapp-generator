@@ -1,7 +1,6 @@
 (function () {
   'use strict';
 
-  // ---------- helpers ----------
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const h = function (tag, attrs) {
@@ -48,12 +47,15 @@
     return { text: s, mono };
   };
 
-  // ---------- state ----------
   const state = {
+    sessionId: localStorage.getItem('auth.sessionId') || '',
+    user: null,
+    version: null,
     connectionId: localStorage.getItem('pg.connId') || '',
     connection: null,
+    availableSchemas: [],
     schema: null,
-    currentTable: null,
+    currentView: null,   // null | { kind:'table', name } | { kind:'users' }
     page: 1,
     pageSize: 20,
     totalRows: 0,
@@ -65,6 +67,7 @@
 
   function commonHeaders() {
     const hdr = { 'Content-Type': 'application/json' };
+    if (state.sessionId) hdr['X-Auth-Session-Id'] = state.sessionId;
     if (state.connectionId) hdr['X-PG-Conn-ID'] = state.connectionId;
     return hdr;
   }
@@ -91,15 +94,238 @@
         if (data.column) e.column = data.column;
         if (data.hints) e.hints = data.hints;
       }
-      if (res.status === 401) e.status = 401;
       e.status = res.status;
+      if (res.status === 401 && /AUTH_/.test(e.code || '')) {
+        state.sessionId = '';
+        try { localStorage.removeItem('auth.sessionId'); } catch (_) {}
+        state.user = null;
+      }
       throw e;
     }
     return data;
   }
 
-  // ---------- dialog mode ----------
-  // Open our shared credential dialog but inject mode + mode-aware submit.
+  // ---------- Login screen ----------
+  function renderLogin() {
+    const root = $('#app-root');
+    if (!root) return;
+    root.innerHTML = '';
+    const wrap = h('div', { class: 'login-wrap' });
+    const card = h('div', { class: 'login-card' });
+    wrap.appendChild(card);
+    root.appendChild(wrap);
+
+    const alertHost = h('div');
+    const brand = h('div', { class: 'brand-row' },
+      h('span', { class: 'badge', text: 'Live' }),
+      h('span', { style: 'font-weight:700;letter-spacing:-0.01em;', text: 'PostgreSQL Schema Interpreter' })
+    );
+    const title = h('h1', { class: 'title', text: 'Sign in to continue' });
+    const lede = h('p', { class: 'lede', text: 'Username and password authenticate you to the interpreter app itself. You will still provide Postgres connection credentials next.' });
+    card.appendChild(alertHost);
+    card.appendChild(brand);
+    card.appendChild(title);
+    card.appendChild(lede);
+
+    const userG = h('div', { class: 'form-group' });
+    userG.appendChild(h('label', { for: 'li-user', text: 'Username' }));
+    const userInp = h('input', { type: 'text', class: 'form-control', id: 'li-user', autocomplete: 'username' });
+    userG.appendChild(userInp);
+    const passG = h('div', { class: 'form-group' });
+    passG.appendChild(h('label', { for: 'li-pass', text: 'Password' }));
+    const passInp = h('input', { type: 'password', class: 'form-control', id: 'li-pass', autocomplete: 'current-password' });
+    passG.appendChild(passInp);
+    card.appendChild(userG);
+    card.appendChild(passG);
+
+    const submitBtn = h('button', { type: 'button', class: 'btn btn-primary', text: 'Sign in' });
+    submitBtn.addEventListener('click', onSubmit);
+    const footer = h('div', { class: 'footer-hint',
+      html: 'Default on first run: <code>admin</code> / <code>admin123</code> — change this password immediately in the Users page after you sign in.' });
+    card.appendChild(submitBtn);
+    card.appendChild(footer);
+
+    userInp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); passInp.focus(); } });
+    passInp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); onSubmit(); } });
+    setTimeout(() => { userInp.focus(); }, 20);
+
+    function setAlert(kind, title, msg, extras) {
+      alertHost.innerHTML = '';
+      if (!kind) return;
+      const a = h('div', { class: 'alert alert-' + kind });
+      const b = h('div', { class: 'body' });
+      if (title) b.appendChild(h('div', { class: 'title', text: title }));
+      if (msg) b.appendChild(h('div', { class: 'detail', text: msg }));
+      const hints = extras && (extras.hints || (Array.isArray(extras) ? extras : null));
+      if (hints && hints.length) {
+        const ul = h('ul');
+        hints.forEach(h => ul.appendChild(h('li', { text: h })));
+        b.appendChild(ul);
+      }
+      a.appendChild(b);
+      a.appendChild(h('button', { type: 'button', class: 'close', onclick: () => a.remove(), html: '&times;' }));
+      alertHost.appendChild(a);
+    }
+    async function onSubmit() {
+      setAlert(null);
+      const u = userInp.value.trim();
+      const p = passInp.value;
+      if (!u) { userInp.style.borderColor = 'var(--color-danger)'; userInp.focus(); return; }
+      userInp.style.borderColor = '';
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<span class="spinner"></span><span>Signing in…</span>';
+      try {
+        const r = await api('POST', '/api/auth/login', { username: u, password: p });
+        state.sessionId = r.sessionId;
+        state.user = r.user;
+        state.version = r.version;
+        try { localStorage.setItem('auth.sessionId', state.sessionId); } catch (_) {}
+        bootAppShell();
+      } catch (e) {
+        setAlert('danger',
+          (e && (e.code === 'AUTH_BAD_CREDENTIALS' || e.code === 'AUTH_REQUIRED')) ? 'Invalid credentials' : 'Could not sign in',
+          (e && e.message) || String(e), e);
+        passInp.select();
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign in';
+      }
+    }
+  }
+
+  function signOut() {
+    (async () => { try { await api('POST', '/api/auth/logout', {}); } catch (_) {} })();
+    state.sessionId = '';
+    state.user = null;
+    state.connectionId = '';
+    state.connection = null;
+    state.schema = null;
+    state.currentView = null;
+    try { localStorage.removeItem('auth.sessionId'); } catch (_) {}
+    try { localStorage.removeItem('pg.connId'); } catch (_) {}
+    renderLogin();
+  }
+
+  // ---------- App shell (after sign-in) ----------
+  function shellDom() {
+    return h('div', { class: 'app' },
+      h('div', { class: 'topbar' },
+        h('div', { class: 'brand' },
+          h('span', { class: 'badge', text: 'Live' }),
+          h('span', { text: 'PostgreSQL Schema Interpreter' }),
+          h('span', {
+            class: 'version-pill', title: 'Software build (yymmdd.hhmm)',
+            text: state.version || 'loading…',
+          })
+        ),
+        h('div', { id: 'conn', class: 'conn disconnected' },
+          h('span', { id: 'conn-pill', class: 'pill', title: 'Not connected — click Connect to Postgres' },
+            h('span', { class: 'dot' }),
+            h('span', { id: 'conn-text', text: 'Not connected' })
+          ),
+          h('button', { id: 'btn-connect', class: 'btn btn-primary btn-small', type: 'button', text: 'Connect to Postgres' }),
+          h('button', { id: 'btn-disconnect', class: 'btn btn-small', type: 'button', style: 'display:none', text: 'Disconnect' }),
+          h('div', { class: 'user-area' },
+            h('span', { class: 'user-pill', title: 'Current signed-in interpreter user' },
+              h('span', { class: 'uname', text: state.user ? state.user.username : '?' }),
+              h('span', { class: 'role ' + (state.user && state.user.role === 'admin' ? 'admin' : 'normal'),
+                text: state.user ? state.user.role : '?' })
+            ),
+            h('button', { id: 'btn-account', class: 'btn btn-small', type: 'button', text: 'Account' }),
+            h('button', { id: 'btn-signout', class: 'btn btn-small', type: 'button', text: 'Sign out' })
+          )
+        )
+      ),
+      h('aside', { class: 'sidebar', id: 'sidebar' }),
+      h('main', { class: 'content', id: 'content' })
+    );
+  }
+
+  function bootAppShell() {
+    const root = $('#app-root');
+    root.innerHTML = '';
+    root.appendChild(shellDom());
+    // Wire shell permanent actions
+    $('#btn-signout').addEventListener('click', signOut);
+    $('#btn-account').addEventListener('click', openAccountModal);
+    // Boot flow
+    setConnectedUi(false);
+    renderSidebar();
+    renderWelcome();
+
+    $('#btn-connect').addEventListener('click', () => {
+      openCredentialDialog({ reusePassword: !!state._saved });
+    });
+    $('#conn-pill').addEventListener('click', () => {
+      openCredentialDialog({ reusePassword: !!state._saved });
+    });
+    $('#btn-disconnect').addEventListener('click', async () => {
+      try { await api('POST', '/api/interpreter/disconnect', {}); } catch (_) {}
+      clearConnection();
+    });
+
+    (async function restore() {
+      // Session already validated via login; version now known.
+      if (!state.version) {
+        try {
+          const v = await api('GET', '/api/version');
+          state.version = v.version;
+          const verEl = document.querySelector('.version-pill');
+          if (verEl) { verEl.textContent = state.version; verEl.title = 'Built ' + (v.builtAt || ''); }
+        } catch (_) {}
+      }
+      if (state.sessionId && state.connectionId) {
+        try {
+          const s = await api('GET', '/api/interpreter/status');
+          if (s && s.connected && s.connection) {
+            state.connection = s.connection;
+            state.availableSchemas = Array.isArray(s.availableSchemas) ? s.availableSchemas : [];
+            if (state.user && s.auth && s.auth.username === state.user.username && s.auth.role) {
+              state.user.role = s.auth.role;
+            }
+            setConnectedUi(true, state.connection);
+            await loadSchema();
+            renderSidebar();
+            const hash = location.hash.replace(/^#/, '');
+            const route = parseHash(hash);
+            if (route) await navigateByRoute(route);
+            else if (state.schema.tables && state.schema.tables[0]) {
+              navigateToTable(state.schema.tables[0].name);
+            }
+            return;
+          }
+        } catch (e) {
+          if (e && (e.status === 401)) { signOut(); return; }
+        }
+        clearConnection();
+      }
+      window.addEventListener('hashchange', onHashChange);
+    })();
+  }
+
+  function onHashChange() {
+    const hash = location.hash.replace(/^#/, '');
+    const route = parseHash(hash);
+    if (!route) return;
+    navigateByRoute(route);
+  }
+
+  function parseHash(hash) {
+    if (!hash) return null;
+    if (hash === 'users') return { kind: 'users' };
+    if (state.schema && state.schema.tables && state.schema.tables.find(t => t.name === hash)) {
+      return { kind: 'table', name: hash };
+    }
+    return null;
+  }
+
+  async function navigateByRoute(route) {
+    if (!state.schema) { try { await loadSchema(); renderSidebar(); } catch (_) {} }
+    if (route.kind === 'users') return renderUsersPage();
+    if (route.kind === 'table') return navigateToTable(route.name);
+  }
+
+  // ---------- Connect dialog ----------
   function openCredentialDialog(opts) {
     opts = opts || {};
     const initialValues = Object.assign({
@@ -107,12 +333,11 @@
       port: (state._saved && state._saved.port) || Number(localStorage.getItem('pg.port')) || 5432,
       database: (state._saved && state._saved.database) || localStorage.getItem('pg.db') || '',
       user: (state._saved && state._saved.user) || localStorage.getItem('pg.user') || 'postgres',
-      password: (opts && opts.reusePassword && state._saved && state._saved.password) ? state._saved.password : '',
+      password: (opts.reusePassword && state._saved && state._saved.password) ? state._saved.password : '',
       schema: (state._saved && state._saved.schema) || localStorage.getItem('pg.schema') || 'public',
       ssl: false,
     }, opts.initial || {});
 
-    // Build the dialog shell.
     const backdrop = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === backdrop) close(); } });
     const modal = h('div', { class: 'modal' });
     const header = h('div', { class: 'modal-header' },
@@ -133,15 +358,14 @@
 
     let submitBtn = null;
 
-    // Fields
     const hostInput = addField(body, 'hostname', 'Hostname', 'text', initialValues.host, 'localhost or db.example.com');
     const row2 = h('div', { class: 'form-group row2' });
     const portInput = addField(row2, 'port', 'Port', 'number', initialValues.port, 'Default 5432');
-    const dbInput   = addField(row2, 'dbname', 'Database name', 'text', initialValues.database, 'e.g. mydb', true);
+    const dbInput   = addField(row2, 'dbname', 'Database name', 'text', initialValues.database, 'e.g. testdb', true);
     body.appendChild(row2);
     const row3 = h('div', { class: 'form-group row2' });
     const userInput  = addField(row3, 'user', 'User', 'text', initialValues.user, '', true);
-    const passInput  = addField(row3, 'pass', 'Password', 'password', initialValues.password, 'Never saved to disk permanently (only held in server memory)');
+    const passInput  = addField(row3, 'pass', 'Password', 'password', initialValues.password, 'Stored only in server memory (never persisted on disk)');
     body.appendChild(row3);
 
     const adv = h('details', { class: 'advanced' });
@@ -150,7 +374,7 @@
     const cbWrap = h('div', { style: 'margin-top:10px' });
     const sslCB = h('input', { type: 'checkbox', id: 'f-ssl' });
     sslCB.checked = !!initialValues.ssl;
-    const sslWrap  = h('label', { class: 'check-row', style: 'display:flex;align-items:center;gap:8px;' }, sslCB, ' Require SSL (PGSSLMODE=require)');
+    const sslWrap  = h('label', { class: 'check-row', style: 'display:flex;align-items:center;gap:8px;' }, sslCB, ' Require SSL');
     cbWrap.appendChild(sslWrap);
     adv.appendChild(cbWrap);
     body.appendChild(adv);
@@ -161,6 +385,9 @@
     footer.appendChild(h('button', { type: 'button', class: 'btn', onclick: close, text: 'Cancel' }));
     submitBtn = h('button', { type: 'button', class: 'btn btn-primary', onclick: onSubmit, text: 'Connect' });
     footer.appendChild(submitBtn);
+
+    document.body.appendChild(backdrop);
+    setTimeout(() => { dbInput.focus(); }, 20);
 
     function addField(container, id, label, type, val, hint, required) {
       const g = h('div', { class: 'form-group' });
@@ -226,9 +453,7 @@
       localStorage.setItem('pg.db', p.database);
       localStorage.setItem('pg.user', p.user);
       localStorage.setItem('pg.schema', p.schema);
-      try {
-        localStorage.setItem('pg.lastConnection', JSON.stringify(p));
-      } catch (_) {}
+      try { localStorage.setItem('pg.lastConnection', JSON.stringify(p)); } catch (_) {}
 
       setSubmitting(true);
       setProgress(15, true);
@@ -238,16 +463,16 @@
         setProgress(100, true);
         state.connectionId = res.connectionId;
         state.connection = res.connection;
+        state.availableSchemas = Array.isArray(res.availableSchemas) ? res.availableSchemas : [res.connection.schema];
+        if (res.auth && res.auth.role) state.user.role = res.auth.role;
         localStorage.setItem('pg.connId', state.connectionId);
         setAlert('success', 'Connected',
           `Connected as ${res.connection.user}@${res.connection.host}:${res.connection.port}/${res.connection.database} — ${res.schemaTables.length} table(s) in schema ${res.connection.schema}.`);
         setProgress(0, false);
-        setTimeout(() => { close(); afterInteractConnect(); }, 700);
+        setTimeout(() => { close(); afterInteractConnect(); }, 650);
       } catch (e) {
         setProgress(0, false);
-        if (e && (e.status === 401 || e.code === 'NO_CONN')) {
-          // Shouldn't happen on connect but handle anyway.
-        }
+        if (e && e.status === 401) { signOut(); return close(); }
         setAlert('danger',
           ((e && e.code === 'VALIDATION') || (e && e.status === 400)) ? 'Please fix the form' : 'Could not connect to Postgres',
           (e && e.message) || String(e), e);
@@ -258,7 +483,6 @@
         setSubmitting(false);
       }
     }
-
     function close() {
       if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
       document.removeEventListener('keydown', escHandler);
@@ -269,18 +493,17 @@
       i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); onSubmit(); } });
     });
 
-    document.body.appendChild(backdrop);
-    setTimeout(() => { dbInput.focus(); }, 20);
     return { close, open: () => null };
   }
 
-  // ---------- Top-level flow ----------
+  // ---------- Shell state renderers ----------
   function setConnectedUi(connected, info) {
     const connEl = $('#conn');
     const pill = $('#conn-pill');
     const text = $('#conn-text');
     const btnConnect = $('#btn-connect');
     const btnDisconnect = $('#btn-disconnect');
+    if (!connEl) return;
     connEl.classList.toggle('disconnected', !connected);
     if (connected && info) {
       pill.title = `Connected as ${info.user} on ${info.host}:${info.port}/${info.database}`;
@@ -296,26 +519,115 @@
       btnConnect.classList.add('btn-primary');
       btnDisconnect.style.display = 'none';
     }
+    // User pill refresh
+    const uname = document.querySelector('.user-pill .uname');
+    const role  = document.querySelector('.user-pill .role');
+    if (uname && state.user) uname.textContent = state.user.username;
+    if (role && state.user) {
+      role.textContent = state.user.role;
+      role.className = 'role ' + (state.user.role === 'admin' ? 'admin' : 'normal');
+    }
+    const ver = document.querySelector('.version-pill');
+    if (ver && state.version) { ver.textContent = state.version; }
   }
 
   function renderSidebar() {
-    const list = $('#tables-list');
-    list.innerHTML = '';
+    const sb = $('#sidebar');
+    if (!sb) return;
+    sb.innerHTML = '';
+    const navTitle = h('h3', { text: 'Navigation' });
+    sb.appendChild(navTitle);
+
+    // App-wide nav
+    const navSection = h('div', { class: 'section-nav' });
+    if (state.user && state.user.role === 'admin') {
+      const isUsers = state.currentView && state.currentView.kind === 'users';
+      const b = h('button', {
+        class: 'nav-btn' + (isUsers ? ' active' : ''),
+        type: 'button',
+        text: 'Users',
+        onclick: () => { location.hash = 'users'; renderUsersPage(); },
+      });
+      const ico = h('span', { class: 'ico', text: '👥' });
+      b.prepend(ico);
+      navSection.appendChild(b);
+    } else {
+      const b = h('button', {
+        class: 'nav-btn', type: 'button',
+        text: 'Change my password',
+        onclick: () => openAccountModal(),
+      });
+      const ico = h('span', { class: 'ico', text: '🔒' });
+      b.prepend(ico);
+      navSection.appendChild(b);
+    }
+    sb.appendChild(navSection);
+
+    // Schema selector + tables
+    const schemaSect = h('div', { style: 'margin-top:18px' });
+    const schemasLabel = h('div', { class: 'section-title', text: 'Schema & Tables' });
+    schemaSect.appendChild(schemasLabel);
+
+    if (state.connection && state.availableSchemas && state.availableSchemas.length) {
+      const row = h('div', { class: 'schema-row' });
+      row.appendChild(h('span', { text: 'Schema:' }));
+      const sel = h('select');
+      state.availableSchemas.forEach(name => {
+        const opt = h('option', { value: name, text: name });
+        if (name === (state.connection && state.connection.schema)) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener('change', async () => {
+        const newSchema = sel.value;
+        if (!newSchema) return;
+        if (newSchema === (state.connection && state.connection.schema)) return;
+        sel.disabled = true;
+        try {
+          const r = await api('POST', '/api/interpreter/schema', { schema: newSchema });
+          if (r && r.connection) {
+            state.connection = r.connection;
+            state.availableSchemas = Array.isArray(r.availableSchemas) ? r.availableSchemas : [];
+            await loadSchema();
+            setConnectedUi(true, state.connection);
+            state.currentView = null;
+            renderSidebar();
+            if (state.schema.tables && state.schema.tables[0]) navigateToTable(state.schema.tables[0].name);
+            else renderWelcome();
+          }
+        } catch (e) {
+          const f = formatErrForAlert(e);
+          const tmp = h('div');
+          document.querySelector('.content') && showAlert(document.querySelector('.content'), 'danger', f.title, f.message, f.hints);
+        } finally {
+          sel.disabled = false;
+        }
+      });
+      row.appendChild(sel);
+      schemaSect.appendChild(row);
+    }
+
+    const tablesTitle = h('h3', { style: 'margin-top:18px; margin-bottom:8px;', text: 'Tables' });
+    schemaSect.appendChild(tablesTitle);
+    const list = h('ul', { id: 'tables-list' });
+    schemaSect.appendChild(list);
+    sb.appendChild(schemaSect);
+
     if (!state.connection || !state.schema) {
       list.appendChild(h('li', {}, h('div', { class: 'empty-msg' },
         'Connect to a Postgres database to see the tables. ',
         h('br'),
-        (() => { const a = h('a', { href: '#', text: 'Connect to Postgres' }); a.addEventListener('click', (e) => { e.preventDefault(); openCredentialDialog({ mode: 'interact' }); }); return a; })()
+        (() => { const a = h('a', { href: '#', text: 'Connect to Postgres' }); a.addEventListener('click', (e) => { e.preventDefault(); openCredentialDialog({}); }); return a; })()
       )));
       return;
     }
     const tables = state.schema.tables || [];
     if (!tables.length) {
-      list.appendChild(h('li', {}, h('div', { class: 'empty-msg' }, `No tables found in schema "${state.schema.schema}".`)));
+      list.appendChild(h('li', {}, h('div', { class: 'empty-msg', text: `No tables found in schema "${state.schema.schema}".` })));
       return;
     }
     tables.forEach((t) => {
-      const a = h('a', { href: '#', class: state.currentTable === t.name ? 'active' : '' },
+      const active = state.currentView && state.currentView.kind === 'table' && state.currentView.name === t.name;
+      const a = h('a', { href: '#', class: active ? 'active' : '' },
         h('span', { class: 'tname', text: t.name }),
         h('span', { class: 'tmeta', text: t.columns.length + ' cols' })
       );
@@ -329,12 +641,11 @@
     try {
       const s = await api('GET', '/api/interpreter/schema');
       state.schema = s;
+      state.availableSchemas = Array.isArray(s.availableSchemas) ? s.availableSchemas : state.availableSchemas;
       return s;
     } catch (e) {
-      if (e && (e.status === 401 || e.code === 'NO_CONN')) {
-        // Lost session
-        clearConnection();
-      }
+      if (e && (e.status === 401 && /AUTH_/.test(e.code || ''))) { signOut(); throw e; }
+      if (e && (e.code === 'NO_CONN' || e.status === 401)) clearConnection();
       throw e;
     }
   }
@@ -344,8 +655,8 @@
     await loadSchema();
     renderSidebar();
     const hash = location.hash.replace(/^#/, '');
-    const want = state.schema.tables.find(t => t.name === hash);
-    if (want) { navigateToTable(want.name); }
+    const route = parseHash(hash);
+    if (route) await navigateByRoute(route);
     else if (state.schema.tables && state.schema.tables[0]) {
       navigateToTable(state.schema.tables[0].name);
     } else {
@@ -357,7 +668,8 @@
     state.connectionId = '';
     state.connection = null;
     state.schema = null;
-    state.currentTable = null;
+    state.currentView = null;
+    state.availableSchemas = [];
     try { localStorage.removeItem('pg.connId'); } catch (_) {}
     setConnectedUi(false);
     renderSidebar();
@@ -367,6 +679,7 @@
   function renderWelcome() {
     const content = $('#content');
     content.innerHTML = '';
+    state.currentView = null;
     content.appendChild(h('div', { class: 'welcome', id: 'welcome-card' },
       h('h1', { text: 'Interact with Postgres tables live — no code generation' }),
       h('p', { class: 'lede',
@@ -376,30 +689,400 @@
               'any generated files to disk.' }),
       h('h2', { text: 'Quick start' }),
       (() => {
-        const a = h('a', { href: '#', class: 'btn btn-primary', style: 'margin-top:14px;display:inline-flex;' ,
-          text: 'Connect to Postgres' });
-        a.addEventListener('click', (e) => { e.preventDefault(); openCredentialDialog({ mode: 'interact' }); });
+        const a = h('a', { href: '#', class: 'btn btn-primary', style: 'margin-top:14px;display:inline-flex;', text: 'Connect to Postgres' });
+        a.addEventListener('click', (e) => { e.preventDefault(); openCredentialDialog({}); });
         return a;
       })(),
       h('ul', { style: 'margin-top:20px' },
         h('li', { html: 'Click <strong>Connect to Postgres</strong> at the top-right (or use the link in the sidebar) to enter credentials.' }),
-        h('li', { html: 'The credential dialog has two modes — pick <strong>Interact live (no code generation)</strong>.' }),
-        h('li', { text: 'After connecting, pick any table from the left sidebar to browse rows, modify, create, or delete.' }),
-        h('li', { html: 'You can <em>re-enter credentials at any time</em> by clicking the connection pill or Connect to Postgres in the header — even while already connected.' }),
+        h('li', { html: 'After connecting, the sidebar shows a <strong>Schema</strong> picker — use it to switch schemas on the same database.' }),
+        h('li', { text: 'Pick any table from the sidebar to browse rows, modify, create, or delete.' }),
+        h('li', { html: 'Click the <strong>Account</strong> button to change your password. Administrators see a <strong>Users</strong> page to manage all accounts.' }),
+        h('li', { html: 'You can <em>re-enter Postgres credentials at any time</em> by clicking the connection pill or Connect / Change credentials in the header.' })
       )
     ));
   }
 
-  // ---------- Table rendering (generic DDL interpreter page) ----------
+  // ---------- Account modal (change password, admin can change any field) ----------
+  function openAccountModal() {
+    const backdrop = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === backdrop) close(); } });
+    const modal = h('div', { class: 'modal' });
+    const isAdmin = state.user && state.user.role === 'admin';
+    const title = isAdmin ? 'Update your account' : 'Change your password';
+    const header = h('div', { class: 'modal-header' },
+      h('h2', { text: title }),
+      h('button', { type: 'button', class: 'close', onclick: close, html: '&times;' })
+    );
+    const body = h('div', { class: 'modal-body' });
+    const footer = h('div', { class: 'modal-footer' },
+      h('button', { type: 'button', class: 'btn', onclick: close, text: 'Close' })
+    );
+    modal.appendChild(header); modal.appendChild(body); modal.appendChild(footer);
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+    const alertHost = h('div'); body.appendChild(alertHost);
+
+    function setAlert(kind, title, msg, extras) {
+      alertHost.innerHTML = '';
+      if (!kind) return;
+      const a = h('div', { class: 'alert alert-' + kind });
+      const b = h('div', { class: 'body' });
+      if (title) b.appendChild(h('div', { class: 'title', text: title }));
+      if (msg) b.appendChild(h('div', { class: 'detail', text: msg }));
+      const hints = extras && (extras.hints || (Array.isArray(extras) ? extras : null));
+      if (hints && hints.length) {
+        const ul = h('ul'); hints.forEach(x => ul.appendChild(h('li', { text: x }))); b.appendChild(ul);
+      }
+      a.appendChild(b);
+      a.appendChild(h('button', { type: 'button', class: 'close', onclick: () => a.remove(), html: '&times;' }));
+      alertHost.appendChild(a);
+    }
+
+    // Current user info card
+    const info = h('div', { style: 'background:var(--color-panel);border:1px solid var(--color-border);border-radius:8px;padding:10px 12px;margin-bottom:14px;' },
+      h('div', { style: 'font-size:12px;color:var(--color-muted);text-transform:uppercase;letter-spacing:0.06em;', text: 'Signed in as' }),
+      h('div', { style: 'font-weight:700;font-size:15px;margin-top:4px;', text: state.user.username }),
+      h('div', { style: 'margin-top:2px;' },
+        h('span', { class: 'user-role-tag ' + (state.user.role === 'admin' ? 'admin' : ''), text: state.user.role })
+      )
+    );
+    body.appendChild(info);
+
+    const curG = h('div', { class: 'form-group' });
+    curG.appendChild(h('label', { for: 'acc-cur', text: 'Current password' + (isAdmin ? ' (optional if admin changing yourself)' : '') }));
+    const curInp = h('input', { type: 'password', class: 'form-control', id: 'acc-cur' });
+    curG.appendChild(curInp);
+    if (!isAdmin) body.appendChild(curG);
+
+    const newG = h('div', { class: 'form-group' });
+    newG.appendChild(h('label', { for: 'acc-new', text: 'New password' }));
+    const newInp = h('input', { type: 'password', class: 'form-control', id: 'acc-new' });
+    newG.appendChild(newInp);
+    const confG = h('div', { class: 'form-group' });
+    confG.appendChild(h('label', { for: 'acc-conf', text: 'Confirm new password' }));
+    const confInp = h('input', { type: 'password', class: 'form-control', id: 'acc-conf' });
+    confG.appendChild(confInp);
+    body.appendChild(newG);
+    body.appendChild(confG);
+
+    if (isAdmin) {
+      const row = h('div', { class: 'form-group row2' });
+      const nameG = h('div', { class: 'form-group' });
+      nameG.appendChild(h('label', { for: 'acc-username', text: 'Username' }));
+      const nameInp = h('input', { type: 'text', class: 'form-control', id: 'acc-username', value: state.user.username });
+      nameG.appendChild(nameInp);
+      const roleG = h('div', { class: 'form-group' });
+      roleG.appendChild(h('label', { for: 'acc-role', text: 'Role' }));
+      const roleSel = h('select', { class: 'form-control', id: 'acc-role' });
+      ['admin', 'normal'].forEach(r => {
+        const o = h('option', { value: r, text: r });
+        if (r === state.user.role) o.selected = true;
+        roleSel.appendChild(o);
+      });
+      roleG.appendChild(roleSel);
+      row.appendChild(nameG); row.appendChild(roleG);
+      body.appendChild(row);
+      body.appendChild(curG);
+    }
+
+    const goBtn = h('button', { type: 'button', class: 'btn btn-primary', text: isAdmin ? 'Save changes' : 'Change password' });
+    goBtn.addEventListener('click', async () => {
+      goBtn.disabled = true;
+      setAlert(null);
+      try {
+        const payload = {};
+        if (newInp.value || confInp.value) {
+          if (newInp.value !== confInp.value) {
+            const e = new Error('New password and confirmation do not match.');
+            e.status = 400; e.code = 'AUTH_VALIDATION'; throw e;
+          }
+          payload.password = newInp.value;
+        }
+        if (!isAdmin) {
+          payload.currentPassword = curInp.value;
+        } else if (newInp.value) {
+          if (curInp.value) payload.currentPassword = curInp.value;
+        }
+        if (isAdmin) {
+          payload.username = nameInp.value.trim();
+          payload.role = roleSel.value;
+        }
+        const r = await api('PUT', `/api/auth/users/${encodeURIComponent(state.user.username)}`, payload);
+        if (r && r.user) state.user = r.user;
+        setAlert('success', 'Saved', 'Your account was updated.');
+        setConnectedUi(true, state.connection);
+        setTimeout(close, 500);
+      } catch (e) {
+        setAlert('danger',
+          (e && /AUTH_VALIDATION|AUTH_BAD_CURRENT_PASSWORD/.test(e.code || '')) ? 'Could not save' : 'Error',
+          (e && e.message) || String(e), e);
+      } finally {
+        goBtn.disabled = false;
+      }
+    });
+    footer.appendChild(goBtn);
+
+    function close() {
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+      document.removeEventListener('keydown', escHandler);
+    }
+    function escHandler(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', escHandler);
+  }
+
+  // ---------- Admin Users page ----------
+  function renderUsersPage() {
+    state.currentView = { kind: 'users' };
+    location.hash = 'users';
+    renderSidebar();
+    const content = $('#content');
+    content.innerHTML = '';
+    const alerts = h('div');
+    const header = h('header', { class: 'page' },
+      h('h1', {}, 'App users', h('small', { text: ' · interpreter accounts (one-way password hashes, stored locally)' })),
+      h('div', { class: 'row-actions' },
+        h('button', { class: 'btn btn-primary btn-small', type: 'button', text: '+ New user', onclick: () => openCreateUserModal(onChanged) })
+      )
+    );
+    content.appendChild(header);
+    content.appendChild(alerts);
+    const tb = h('div', { class: 'users-toolbar' });
+    const body = h('div');
+    content.appendChild(tb);
+    content.appendChild(body);
+    onChanged();
+
+    async function onChanged() {
+      body.innerHTML = '';
+      try {
+        const { users } = await api('GET', '/api/auth/users');
+        const wrap = h('div', { class: 'table-wrap' });
+        const tbl = h('table', { class: 'tbl' });
+        const thead = h('thead');
+        const htr = h('tr');
+        ['Username', 'Role', 'Created', 'Actions'].forEach(x => htr.appendChild(h('th', { text: x })));
+        thead.appendChild(htr);
+        tbl.appendChild(thead);
+        const tbody = h('tbody');
+        if (!users.length) {
+          tbody.appendChild(h('tr', { class: 'row-empty' }, h('td', { text: 'No users. Click + New user to create one.' })));
+        } else {
+          users.forEach(u => {
+            const tr = h('tr');
+            tr.appendChild(h('td', {}, h('span', { style: 'font-weight:600', text: u.username })));
+            const roleTd = h('td');
+            const tag = h('span', { class: 'user-role-tag ' + (u.role === 'admin' ? 'admin' : ''), text: u.role });
+            roleTd.appendChild(tag);
+            tr.appendChild(roleTd);
+            const cr = u.createdAt ? new Date(u.createdAt) : null;
+            tr.appendChild(h('td', { class: 'mono', text: cr ? cr.toISOString().slice(0, 16).replace('T', ' ') : '—' }));
+            const act = h('td', { class: 'action-cell' });
+            const editBtn = h('button', { class: 'btn btn-small', type: 'button', text: 'Edit' });
+            editBtn.addEventListener('click', () => openEditUserModal(u, onChanged));
+            act.appendChild(editBtn);
+            if (String(u.username).toLowerCase() !== String(state.user.username || '').toLowerCase()) {
+              const delBtn = h('button', { class: 'btn btn-small btn-danger', type: 'button', text: 'Delete' });
+              delBtn.addEventListener('click', () => openDeleteUserModal(u, onChanged));
+              act.appendChild(delBtn);
+            } else {
+              act.appendChild(h('span', { class: 'chip', text: 'you' }));
+            }
+            tr.appendChild(act);
+            tbody.appendChild(tr);
+          });
+        }
+        tbl.appendChild(tbody);
+        wrap.appendChild(tbl);
+        body.appendChild(wrap);
+      } catch (e) {
+        if (e && e.status === 401 && /AUTH_/.test(e.code || '')) return signOut();
+        const f = formatErrForAlert(e);
+        showAlert(alerts, 'danger', f.title, f.message, f.hints);
+      }
+    }
+  }
+
+  function openCreateUserModal(done) {
+    userEditorModal({ mode: 'create', onDone: done });
+  }
+  function openEditUserModal(u, done) {
+    userEditorModal({ mode: 'edit', user: u, onDone: done });
+  }
+  function openDeleteUserModal(u, done) {
+    const backdrop = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === backdrop) close(); } });
+    const modal = h('div', { class: 'modal' });
+    const header = h('div', { class: 'modal-header' },
+      h('h2', { text: 'Delete user: ' + u.username }),
+      h('button', { type: 'button', class: 'close', onclick: close, html: '&times;' })
+    );
+    const body = h('div', { class: 'modal-body' });
+    const footer = h('div', { class: 'modal-footer' },
+      h('button', { type: 'button', class: 'btn', onclick: close, text: 'Cancel' })
+    );
+    modal.appendChild(header); modal.appendChild(body); modal.appendChild(footer);
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+    const alertHost = h('div'); body.appendChild(alertHost);
+    body.appendChild(h('p', { text: 'This will permanently remove the interpreter account. Rows in Postgres databases are not affected.' }));
+    const info = h('ul', { style: 'background:rgba(248,81,73,0.06);border:1px solid rgba(248,81,73,0.3);padding:10px 10px 10px 28px;border-radius:8px;' });
+    info.appendChild(h('li', { text: 'Username: ' + u.username }));
+    info.appendChild(h('li', { text: 'Role: ' + u.role }));
+    body.appendChild(info);
+    const goBtn = h('button', { class: 'btn btn-danger', type: 'button', text: 'Permanently delete user' });
+    goBtn.addEventListener('click', async () => {
+      goBtn.disabled = true;
+      try {
+        await api('DELETE', `/api/auth/users/${encodeURIComponent(u.username)}`);
+        close();
+        done && done();
+      } catch (e) {
+        goBtn.disabled = false;
+        setAlertDom(alertHost, 'danger',
+          (e && e.status === 400 || /AUTH_VALIDATION/.test(e.code || '')) ? 'Could not delete' : 'Error',
+          (e && e.message) || String(e), e);
+      }
+    });
+    footer.appendChild(goBtn);
+    function close() {
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+      document.removeEventListener('keydown', escHandler);
+    }
+    function escHandler(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', escHandler);
+  }
+
+  function userEditorModal({ mode, user, onDone }) {
+    const backdrop = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === backdrop) close(); } });
+    const modal = h('div', { class: 'modal' });
+    const title = mode === 'edit' ? ('Edit user: ' + user.username) : 'Create new user';
+    const header = h('div', { class: 'modal-header' },
+      h('h2', { text: title }),
+      h('button', { type: 'button', class: 'close', onclick: close, html: '&times;' })
+    );
+    const body = h('div', { class: 'modal-body' });
+    const footer = h('div', { class: 'modal-footer' },
+      h('button', { type: 'button', class: 'btn', onclick: close, text: 'Cancel' })
+    );
+    modal.appendChild(header); modal.appendChild(body); modal.appendChild(footer);
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+
+    const alertHost = h('div'); body.appendChild(alertHost);
+    const grid = h('div', { class: 'form-grid' });
+    const nameG = h('div');
+    nameG.appendChild(h('label', { for: 'ue-name', text: 'Username' },
+      h('span', { style: 'color:var(--color-danger);margin-left:4px;', text: '*' })));
+    const nameInp = h('input', { type: 'text', class: 'form-control', id: 'ue-name' });
+    if (mode === 'edit') { nameInp.value = user.username; }
+    nameG.appendChild(nameInp);
+    grid.appendChild(nameG);
+    const roleG = h('div');
+    roleG.appendChild(h('label', { for: 'ue-role', text: 'Role' }));
+    const roleSel = h('select', { class: 'form-control', id: 'ue-role' });
+    ['admin', 'normal'].forEach(r => {
+      const o = h('option', { value: r, text: r });
+      if (mode === 'edit' && r === user.role) o.selected = true;
+      roleSel.appendChild(o);
+    });
+    roleG.appendChild(roleSel);
+    grid.appendChild(roleG);
+
+    const passG = h('div', { class: mode === 'edit' ? '' : 'full' });
+    passG.appendChild(h('label', { for: 'ue-pass', text: mode === 'edit' ? 'New password' : 'Password' },
+      mode === 'edit' ? null : h('span', { style: 'color:var(--color-danger);margin-left:4px;', text: '*' })));
+    const passInp = h('input', { type: 'password', class: 'form-control', id: 'ue-pass' });
+    passG.appendChild(passInp);
+    grid.appendChild(passG);
+
+    if (mode === 'edit') {
+      const confG = h('div');
+      confG.appendChild(h('label', { for: 'ue-conf', text: 'Confirm new password' }));
+      const confInp = h('input', { type: 'password', class: 'form-control', id: 'ue-conf' });
+      confG.appendChild(confInp);
+      grid.appendChild(confG);
+    }
+    body.appendChild(grid);
+
+    const goBtn = h('button', { type: 'button', class: 'btn btn-primary', text: mode === 'edit' ? 'Save changes' : 'Create user' });
+    goBtn.addEventListener('click', async () => {
+      goBtn.disabled = true;
+      try {
+        const payload = {};
+        payload.role = roleSel.value;
+        const name = nameInp.value.trim();
+        if (!name) throw vErr('Username is required.');
+        if (mode === 'create') {
+          payload.username = name;
+          const pw = passInp.value;
+          if (!pw || pw.length < 6) throw vErr('Password must be at least 6 characters.');
+          payload.password = pw;
+        } else {
+          if (name !== user.username) payload.username = name;
+          if (passInp.value || confInp.value) {
+            if (passInp.value !== (confInp.value || '')) throw vErr('New password and confirmation do not match.');
+            if (passInp.value.length < 6) throw vErr('Password must be at least 6 characters.');
+            payload.password = passInp.value;
+          }
+        }
+        if (mode === 'create') {
+          await api('POST', '/api/auth/users', payload);
+        } else {
+          await api('PUT', `/api/auth/users/${encodeURIComponent(user.username)}`, payload);
+          if (String(payload.username || user.username).toLowerCase() === String(state.user.username || '').toLowerCase()) {
+            state.user.username = payload.username || user.username;
+            state.user.role = payload.role || user.role;
+            setConnectedUi(true, state.connection);
+          }
+        }
+        setAlertDom(alertHost, 'success', 'Saved', 'User updated.');
+        setTimeout(() => { close(); onDone && onDone(); }, 400);
+      } catch (e) {
+        goBtn.disabled = false;
+        setAlertDom(alertHost, 'danger',
+          (e && (e.status === 400 || /AUTH_VALIDATION|NOT_FOUND/.test(e.code || ''))) ? 'Could not save' : 'Error',
+          (e && e.message) || String(e), e);
+      }
+    });
+    footer.appendChild(goBtn);
+
+    function close() {
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+      document.removeEventListener('keydown', escHandler);
+    }
+    function escHandler(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', escHandler);
+  }
+
+  function vErr(msg) {
+    const e = new Error(msg); e.status = 400; e.code = 'AUTH_VALIDATION'; return e;
+  }
+
+  function setAlertDom(host, kind, title, msg, extras) {
+    host.innerHTML = '';
+    if (!kind) return;
+    const a = h('div', { class: 'alert alert-' + kind });
+    const b = h('div', { class: 'body' });
+    if (title) b.appendChild(h('div', { class: 'title', text: title }));
+    if (msg) b.appendChild(h('div', { class: 'detail', text: msg }));
+    const hints = extras && (extras.hints || (Array.isArray(extras) ? extras : null));
+    if (hints && hints.length) {
+      const ul = h('ul'); hints.forEach(x => ul.appendChild(h('li', { text: x }))); b.appendChild(ul);
+    }
+    a.appendChild(b);
+    a.appendChild(h('button', { type: 'button', class: 'close', onclick: () => a.remove(), html: '&times;' }));
+    host.appendChild(a);
+  }
+
+  // ---------- Table page (existing interpreter CRUD) ----------
   async function navigateToTable(name) {
-    if (!state.schema) { await loadSchema(); renderSidebar(); }
+    if (!state.schema) { try { await loadSchema(); renderSidebar(); } catch (_) {} }
     const t = (state.schema.tables || []).find(tt => tt.name === name);
-    if (!t) { renderWelcome(); return; }
-    state.currentTable = name;
+    state.currentView = { kind: 'table', name };
     location.hash = encodeURIComponent(name);
     state.page = state.page || 1;
     state.pageSize = state.pageSize || 20;
     renderSidebar();
+    if (!t) { renderWelcome(); return; }
     await renderTablePage(t);
   }
 
@@ -407,7 +1090,8 @@
     return {
       title: err && err.code === 'NO_CONN' ? 'No active connection' :
              err && err.code === 'NO_TABLE' ? 'Unknown table' :
-             err && /^4\d\d$|VALIDATION/.test(err.code) ? 'Request failed' :
+             err && err.code === 'AUTH_FORBIDDEN' ? 'Forbidden' :
+             err && /^4\d\d$|VALIDATION|AUTH_/.test(err.code || '') ? 'Request failed' :
              'Database error',
       message: (err && err.message) || String(err),
       hints: (err && err.hints) || (err && err.hint ? [err.hint] : null) || null,
@@ -420,7 +1104,6 @@
     const alerts = h('div');
     const pager = h('div', { class: 'pager' });
     const tableWrap = h('div', { class: 'table-wrap' });
-
     const header = h('header', { class: 'page' },
       h('h1', {
         html: (t.schema ? '<small>' + esc(t.schema) + '.</small>' : '') + esc(t.name),
@@ -432,12 +1115,10 @@
         t.hasExplicitPk ? null : h('span', { class: 'chip', text: 'No PK: create only' }),
       )
     );
-
     content.appendChild(header);
     content.appendChild(alerts);
     content.appendChild(pager);
     content.appendChild(tableWrap);
-
     try {
       const limit = state.pageSize;
       const offset = (state.page - 1) * state.pageSize;
@@ -446,6 +1127,7 @@
       renderPager(pager, t, alerts);
       renderTableRows(tableWrap, t, data);
     } catch (e) {
+      if (e && e.status === 401 && /AUTH_/.test(e.code || '')) return signOut();
       tableWrap.innerHTML = '';
       renderPager(pager, t, alerts);
       const f = formatErrForAlert(e);
@@ -473,7 +1155,6 @@
     const page = state.page;
     const from = total ? (page - 1) * size + 1 : 0;
     const to = Math.min(page * size, total);
-
     const prevBtn = h('button', { class: 'btn btn-small', type: 'button', text: '‹ Prev', disabled: page <= 1 });
     prevBtn.addEventListener('click', async () => { state.page = page - 1; await renderTablePage(t); });
     const nextBtn = h('button', { class: 'btn btn-small', type: 'button', text: 'Next ›', disabled: page >= totalPages });
@@ -482,7 +1163,6 @@
     firstBtn.addEventListener('click', async () => { state.page = 1; await renderTablePage(t); });
     const lastBtn = h('button', { class: 'btn btn-small btn-ghost', type: 'button', text: 'Last »', disabled: page >= totalPages });
     lastBtn.addEventListener('click', async () => { state.page = totalPages; await renderTablePage(t); });
-
     const sizeSel = h('select', { class: 'form-control', style: 'width:110px;padding:5px 8px' });
     [20, 50, 100, 200].forEach(n => {
       const o = h('option', { value: String(n), text: n + '/page' });
@@ -494,7 +1174,6 @@
       state.page = 1;
       renderTablePage(t);
     });
-
     pagerEl.appendChild(firstBtn);
     pagerEl.appendChild(prevBtn);
     pagerEl.appendChild(nextBtn);
@@ -650,7 +1329,7 @@
 
     input.addEventListener('input', () => {
       if (col.isNullable && nullCB && nullCB.checked) return;
-      if (onChange) onChange(readValue(col, input, nullCB));
+      if (onChange) onChange(readValue());
     });
 
     function readValue() {
@@ -681,7 +1360,7 @@
     const isDelete = kind === 'delete';
     const backdrop = h('div', { class: 'modal-backdrop', onmousedown: (e) => { if (e.target === backdrop) close(); } });
     const modal = h('div', { class: 'modal' });
-    const titleTxt = isDelete ? 'Delete row from ' + t.name :
+    const titleTxt = isDelete ? 'Delete row in ' + t.name :
                      isEdit ? 'Edit row in ' + t.name : 'Create row in ' + t.name;
     const header = h('div', { class: 'modal-header' },
       h('h2', { text: titleTxt }),
@@ -711,19 +1390,19 @@
         try {
           goBtn.disabled = true;
           await api('DELETE', `/api/interpreter/tables/${encodeURIComponent(t.name)}/rows/${encodeURIComponent(rowKey)}`);
-          showAlert(alertHost, 'success', 'Row deleted', 'Row was removed from ' + t.name + '.');
-          setTimeout(() => { close(); navigateToTable(t.name); }, 500);
+          setAlertDom(alertHost, 'success', 'Row deleted', 'Row was removed from ' + t.name + '.');
+          setTimeout(() => { close(); renderTablePage(t); }, 500);
         } catch (e) {
           goBtn.disabled = false;
+          if (e && e.status === 401 && /AUTH_/.test(e.code || '')) { signOut(); return close(); }
           const f = formatErrForAlert(e);
-          showAlert(alertHost, 'danger', f.title, f.message, f.hints);
+          setAlertDom(alertHost, 'danger', f.title, f.message, f.hints);
         }
       });
       footer.appendChild(goBtn);
       return;
     }
 
-    // Create or edit
     const grid = h('div', { class: 'form-grid' });
     const editors = [];
     const editableCols = t.columns.filter(c => {
@@ -739,7 +1418,7 @@
     body.appendChild(grid);
 
     const submitLabel = isEdit ? 'Save changes' : 'Create row';
-    const goBtn = h('button', { class: 'btn ' + (isEdit ? 'btn-primary' : 'btn-primary'), type: 'button', text: submitLabel });
+    const goBtn = h('button', { class: 'btn btn-primary', type: 'button', text: submitLabel });
     goBtn.addEventListener('click', async () => {
       try {
         goBtn.disabled = true;
@@ -747,7 +1426,6 @@
         for (const { col, ed } of editors) {
           const v = ed.readValue();
           if (v === undefined) {
-            // Required but no value? only skip if server handles it (e.g. default/identity).
             if (!col.isNullable && !col.hasDefault && !col.isIdentity) {
               const e = new Error(`Missing required value for ${col.name}.`);
               e.code = 'VALIDATION'; e.hints = [col.name + ' is NOT NULL and has no DEFAULT. Provide a value.'];
@@ -762,12 +1440,13 @@
         } else {
           await api('POST', `/api/interpreter/tables/${encodeURIComponent(t.name)}/rows`, payload);
         }
-        showAlert(alertHost, 'success', isEdit ? 'Row updated' : 'Row created', '');
-        setTimeout(() => { close(); navigateToTable(t.name); }, 500);
+        setAlertDom(alertHost, 'success', isEdit ? 'Row updated' : 'Row created', '');
+        setTimeout(() => { close(); renderTablePage(t); }, 500);
       } catch (e) {
         goBtn.disabled = false;
+        if (e && e.status === 401 && /AUTH_/.test(e.code || '')) { signOut(); return close(); }
         const f = formatErrForAlert(e);
-        showAlert(alertHost, 'danger', f.title, f.message, f.hints);
+        setAlertDom(alertHost, 'danger', f.title, f.message, f.hints);
       }
     });
     footer.appendChild(goBtn);
@@ -783,54 +1462,22 @@
   function openEditModal(t, row, key) { openCrudModal('edit', t, row, key); }
   function openDeleteModal(t, row, key) { openCrudModal('delete', t, row, key); }
 
-  // ---------- boot ----------
-  async function boot() {
-    setConnectedUi(false);
-    renderSidebar();
-    renderWelcome();
-
-    // Bind top-right actions
-    $('#btn-connect').addEventListener('click', () => {
-      openCredentialDialog({
-        mode: state.connectionId ? 'interact' : 'interact',
-        reusePassword: !!state._saved,
-      });
-    });
-    $('#conn-pill').addEventListener('click', () => {
-      openCredentialDialog({ mode: 'interact', reusePassword: !!state._saved });
-    });
-    $('#btn-disconnect').addEventListener('click', async () => {
-      try { await api('POST', '/api/interpreter/disconnect', {}); } catch (_) {}
-      clearConnection();
-    });
-    const emptyConnect = $('#empty-connect');
-    if (emptyConnect) emptyConnect.addEventListener('click', (e) => { e.preventDefault(); openCredentialDialog({ mode: 'interact' }); });
-
-    // Try to restore session (if server still has it)
-    if (state.connectionId) {
-      try {
-        const s = await api('GET', '/api/interpreter/status');
-        if (s && s.connected && s.connection) {
-          state.connection = s.connection;
-          setConnectedUi(true, state.connection);
-          await loadSchema();
-          renderSidebar();
-          const hash = location.hash.replace(/^#/, '');
-          const tbl = (state.schema.tables || []).find(t => t.name === hash);
-          if (tbl) { navigateToTable(tbl.name); }
-          else if (state.schema.tables && state.schema.tables[0]) { navigateToTable(state.schema.tables[0].name); }
-          return;
-        }
-      } catch (_) { /* ignore; just show welcome */ }
-      clearConnection();
+  // ---------- Boot ----------
+  document.addEventListener('DOMContentLoaded', () => {
+    if (state.sessionId) {
+      api('GET', '/api/auth/session')
+        .then(r => {
+          state.user = { username: r.username, role: r.role };
+          state.version = r.version || state.version;
+          bootAppShell();
+        })
+        .catch(() => {
+          state.sessionId = '';
+          try { localStorage.removeItem('auth.sessionId'); } catch (_) {}
+          renderLogin();
+        });
+    } else {
+      renderLogin();
     }
-    window.addEventListener('hashchange', () => {
-      const n = location.hash.replace(/^#/, '');
-      if (!n || !state.schema) return;
-      const t = (state.schema.tables || []).find(tt => tt.name === n);
-      if (t && state.currentTable !== n) navigateToTable(n);
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', boot);
+  });
 })();
