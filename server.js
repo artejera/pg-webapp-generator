@@ -164,6 +164,7 @@ function createApp() {
         hasExplicitPk: t.hasExplicitPk,
         foreignKeys: t.foreignKeys.length,
       })),
+      masterDetailPairs: interpreter.detectMasterDetailPairs(conn.schemaObj),
       auth: { username: req.auth.username, role: req.auth.role },
       version: VERSION,
     });
@@ -185,6 +186,7 @@ function createApp() {
           hasExplicitPk: t.hasExplicitPk,
           foreignKeys: t.foreignKeys.length,
         })),
+        masterDetailPairs: interpreter.detectMasterDetailPairs(conn.schemaObj),
         auth: { username: req.auth.username, role: req.auth.role },
         version: VERSION,
       });
@@ -212,6 +214,7 @@ function createApp() {
           hasExplicitPk: t.hasExplicitPk,
           foreignKeys: t.foreignKeys.length,
         })),
+        masterDetailPairs: interpreter.detectMasterDetailPairs(conn.schemaObj),
         version: VERSION,
       });
     } catch (err) {
@@ -248,6 +251,7 @@ function createApp() {
         connection: interpreter.maskPassword(conn),
         availableSchemas: conn.availableSchemas || [conn.schema],
         tables,
+        masterDetailPairs: interpreter.detectMasterDetailPairs(conn.schemaObj),
       });
     } catch (err) {
       return sendError(res, err);
@@ -285,7 +289,17 @@ function createApp() {
           throw e;
         }
       }
-      const data = await interpreter.listRows(conn, t, req.query.limit, req.query.offset);
+      const filter = {};
+      const q = req.query || {};
+      if (q && typeof q === 'object') {
+        for (const k of Object.keys(q)) {
+          if (k.startsWith('filter.')) {
+            const col = k.slice('filter.'.length);
+            if (col) filter[col] = q[k];
+          }
+        }
+      }
+      const data = await interpreter.listRows(conn, t, req.query.limit, req.query.offset, Object.keys(filter).length ? filter : null);
       return res.json(data);
     } catch (err) {
       return sendError(res, err);

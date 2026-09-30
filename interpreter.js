@@ -441,18 +441,42 @@ function pgError(err) {
   return e;
 }
 
-async function listRows(conn, table, limit, offset) {
+function buildFilteredSql(table, filters) {
+  const cols = new Set(table.columns.map(c => c.name));
+  const safe = filters || {};
+  const entries = [];
+  for (const k of Object.keys(safe)) {
+    if (!cols.has(k)) {
+      const e = new Error('Unknown filter column: ' + String(k));
+      e.status = 400; e.code = 'VALIDATION'; throw e;
+    }
+    entries.push([k, safe[k]]);
+  }
+  const whereParts = entries.map(([c], i) => quoteIdent(c) + ' = $' + (i + 1));
+  const params = entries.map(([c, v]) => {
+    const col = table.columns.find(x => x.name === c);
+    return typedCoerce(v, col ? col.typeClass : 'text');
+  });
+  return { where: whereParts.length ? whereParts.join(' AND ') : null, params, entries };
+}
+
+async function listRows(conn, table, limit, offset, filters) {
   const safeLimit = Math.max(1, Math.min(500, Number(limit) || 20));
   const safeOffset = Math.max(0, Number(offset) || 0);
+  const { where, params, entries } = buildFilteredSql(table, filters);
+  const whereClause = where ? ' WHERE ' + where : '';
+  const limitOffsetParams = entries.length
+    ? [safeLimit, safeOffset]
+    : [safeLimit, safeOffset];
+  const countSql = 'SELECT COUNT(*)::bigint AS total FROM ' + table.quotedName + whereClause;
   const sql =
-    'SELECT * FROM ' + table.quotedName +
-    ' ORDER BY ctid LIMIT $1 OFFSET $2';
-  const countSql = 'SELECT COUNT(*)::bigint AS total FROM ' + table.quotedName;
+    'SELECT * FROM ' + table.quotedName + whereClause +
+    ' ORDER BY ctid LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
   const client = await conn.pool.connect();
   try {
     const [rows, count] = await Promise.all([
-      client.query(sql, [safeLimit, safeOffset]),
-      client.query(countSql),
+      client.query(sql, params.concat(limitOffsetParams)),
+      client.query(countSql, params),
     ]);
     const typeMap = buildTypeMap(table);
     const pkCols = table.effectiveKeys;
@@ -468,12 +492,62 @@ async function listRows(conn, table, limit, offset) {
       total: Number(count.rows[0].total),
       pageSize: safeLimit,
       page: Math.floor(safeOffset / safeLimit) + 1,
+      filter: entries.length ? Object.fromEntries(entries.map(([k, v]) => [k, v])) : null,
     };
   } catch (err) {
     throw pgError(err);
   } finally {
     if (client) try { client.release(); } catch (_) {}
   }
+}
+
+function detectMasterDetailPairs(schemaObj) {
+  const tables = (schemaObj && schemaObj.tables) || [];
+  const byName = new Map();
+  tables.forEach(t => byName.set(String(t.name), t));
+  const pairs = [];
+  const seen = new Set();
+  function push(master, detail, prefix, primary) {
+    const key = String(master.name) + '|' + String(detail.name) + '|' + prefix.join(',');
+    if (seen.has(key)) return; seen.add(key);
+    pairs.push({
+      master: { name: master.name, primaryKeys: (master.primaryKeys || []).slice() },
+      detail: { name: detail.name, primaryKeys: (detail.primaryKeys || []).slice(), matchingPrefix: prefix.slice() },
+      via: primary ? 'primary-key-match' : 'foreign-key-match',
+    });
+  }
+  for (const detail of tables) {
+    if (!detail.hasExplicitPk || detail.primaryKeys.length < 2) continue;
+    const prefix = detail.primaryKeys.slice(0, -1);
+    for (const master of tables) {
+      if (master.name === detail.name) continue;
+      if (!master.hasExplicitPk) continue;
+      const mpk = master.primaryKeys;
+      if (mpk.length !== prefix.length) continue;
+      const same = mpk.every((k, i) => String(k) === String(prefix[i]));
+      if (same) { push(master, detail, mpk.slice(), true); break; }
+    }
+    const fksByCol = new Map();
+    for (const fk of (detail.foreignKeys || [])) {
+      fksByCol.set(String(fk.column), fk);
+    }
+    let everyPrefixHasFk = prefix.length > 0;
+    let fkMasterCandidate = null;
+    for (let i = 0; i < prefix.length; i++) {
+      const fk = fksByCol.get(String(prefix[i]));
+      if (!fk) { everyPrefixHasFk = false; break; }
+      const t = byName.get(String(fk.foreignTableName));
+      if (!t) { everyPrefixHasFk = false; break; }
+      if (!fkMasterCandidate) fkMasterCandidate = t;
+      else if (String(fkMasterCandidate.name) !== String(t.name)) { everyPrefixHasFk = false; break; }
+      const idxInMasterPk = (t.primaryKeys || []).findIndex(k => String(k) === String(fk.foreignColumnName));
+      if (idxInMasterPk !== i) { everyPrefixHasFk = false; break; }
+    }
+    if (everyPrefixHasFk && fkMasterCandidate && fkMasterCandidate.primaryKeys && fkMasterCandidate.primaryKeys.length === prefix.length) {
+      push(fkMasterCandidate, detail, prefix.slice(), false);
+    }
+  }
+  return pairs;
 }
 
 async function getRow(conn, table, encodedKey) {
@@ -611,4 +685,5 @@ module.exports = {
   deleteRow,
   disconnect,
   maskPassword,
+  detectMasterDetailPairs,
 };

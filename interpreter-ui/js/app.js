@@ -54,11 +54,16 @@
     connectionId: localStorage.getItem('pg.connId') || '',
     connection: null,
     availableSchemas: [],
+    masterDetailPairs: [],
     schema: null,
     currentView: null,   // null | { kind:'table', name } | { kind:'users' }
     page: 1,
     pageSize: 20,
     totalRows: 0,
+    master: null,       // { tableName, rowKey, pkCols, pkValues, row, detailTable, prefixCols } -- selected master row as ui-header
+    detailPage: 1,
+    detailPageSize: 20,
+    detailTotalRows: 0,
   };
   try {
     const c = localStorage.getItem('pg.lastConnection');
@@ -159,7 +164,7 @@
       const hints = extras && (extras.hints || (Array.isArray(extras) ? extras : null));
       if (hints && hints.length) {
         const ul = h('ul');
-        hints.forEach(h => ul.appendChild(h('li', { text: h })));
+        hints.forEach(hint => ul.appendChild(h('li', { text: hint })));
         b.appendChild(ul);
       }
       a.appendChild(b);
@@ -464,6 +469,7 @@
         state.connectionId = res.connectionId;
         state.connection = res.connection;
         state.availableSchemas = Array.isArray(res.availableSchemas) ? res.availableSchemas : [res.connection.schema];
+        state.masterDetailPairs = Array.isArray(res.masterDetailPairs) ? res.masterDetailPairs : [];
         if (res.auth && res.auth.role) state.user.role = res.auth.role;
         localStorage.setItem('pg.connId', state.connectionId);
         setAlert('success', 'Connected',
@@ -587,6 +593,8 @@
           if (r && r.connection) {
             state.connection = r.connection;
             state.availableSchemas = Array.isArray(r.availableSchemas) ? r.availableSchemas : [];
+            state.masterDetailPairs = Array.isArray(r.masterDetailPairs) ? r.masterDetailPairs : [];
+            state.master = null;
             await loadSchema();
             setConnectedUi(true, state.connection);
             state.currentView = null;
@@ -604,6 +612,29 @@
       });
       row.appendChild(sel);
       schemaSect.appendChild(row);
+    }
+
+    if (state.connection && state.schema && state.schema.tables && state.schema.tables.length) {
+      const trow = h('div', { class: 'schema-row' });
+      trow.appendChild(h('span', { text: 'Table:' }));
+      const tsel = h('select');
+      (state.schema.tables || []).forEach(t => {
+        const parts = [];
+        if (state.masterDetailPairs && state.masterDetailPairs.some(p => p.master.name === t.name)) parts.push('M');
+        if (state.masterDetailPairs && state.masterDetailPairs.some(p => p.detail.name === t.name)) parts.push('D');
+        const suffix = parts.length ? '  [' + parts.join('/') + ']' : '';
+        const opt = h('option', { value: t.name, text: t.name + '  · ' + t.columns.length + ' cols' + suffix });
+        if (state.currentView && state.currentView.kind === 'table' && state.currentView.name === t.name) opt.selected = true;
+        tsel.appendChild(opt);
+      });
+      tsel.addEventListener('change', () => {
+        const name = tsel.value;
+        if (!name) return;
+        if (state.currentView && state.currentView.kind === 'table' && state.currentView.name === name) return;
+        navigateToTable(name);
+      });
+      trow.appendChild(tsel);
+      schemaSect.appendChild(trow);
     }
 
     const tablesTitle = h('h3', { style: 'margin-top:18px; margin-bottom:8px;', text: 'Tables' });
@@ -627,9 +658,14 @@
     }
     tables.forEach((t) => {
       const active = state.currentView && state.currentView.kind === 'table' && state.currentView.name === t.name;
+      const isMaster = state.masterDetailPairs && state.masterDetailPairs.some(p => p.master.name === t.name);
+      const isDetail = state.masterDetailPairs && state.masterDetailPairs.some(p => p.detail.name === t.name);
+      const mdChip = (isMaster || isDetail) ? h('span', { class: 'md-chip' + (isMaster ? ' master' : '') + (isDetail ? ' detail' : '') },
+        (isMaster ? 'M' : '') + (isMaster && isDetail ? '/' : '') + (isDetail ? 'D' : '')
+      ) : null;
       const a = h('a', { href: '#', class: active ? 'active' : '' },
-        h('span', { class: 'tname', text: t.name }),
-        h('span', { class: 'tmeta', text: t.columns.length + ' cols' })
+        h('span', { class: 'tname', text: t.name }, mdChip),
+        h('span', { class: 'tmeta', text: t.columns.length + ' cols' + (t.primaryKeys.length ? '  ·  PK (' + t.primaryKeys.length + ')' : '') })
       );
       a.addEventListener('click', (e) => { e.preventDefault(); navigateToTable(t.name); });
       list.appendChild(h('li', {}, a));
@@ -642,6 +678,7 @@
       const s = await api('GET', '/api/interpreter/schema');
       state.schema = s;
       state.availableSchemas = Array.isArray(s.availableSchemas) ? s.availableSchemas : state.availableSchemas;
+      state.masterDetailPairs = Array.isArray(s.masterDetailPairs) ? s.masterDetailPairs : [];
       return s;
     } catch (e) {
       if (e && (e.status === 401 && /AUTH_/.test(e.code || ''))) { signOut(); throw e; }
@@ -1077,10 +1114,14 @@
   async function navigateToTable(name) {
     if (!state.schema) { try { await loadSchema(); renderSidebar(); } catch (_) {} }
     const t = (state.schema.tables || []).find(tt => tt.name === name);
+    // Clear selected master if navigating away from master table view
+    if (state.master && state.master.tableName !== name) state.master = null;
     state.currentView = { kind: 'table', name };
     location.hash = encodeURIComponent(name);
     state.page = state.page || 1;
     state.pageSize = state.pageSize || 20;
+    state.detailPage = 1;
+    state.detailPageSize = 20;
     renderSidebar();
     if (!t) { renderWelcome(); return; }
     await renderTablePage(t);
@@ -1104,28 +1145,83 @@
     const alerts = h('div');
     const pager = h('div', { class: 'pager' });
     const tableWrap = h('div', { class: 'table-wrap' });
+    const mdBlock = h('div', { class: 'master-detail-block' });
+
+    const isMasterTable = !!(state.masterDetailPairs && state.masterDetailPairs.find(p => p.master.name === t.name));
+    const masterPair = isMasterTable ? state.masterDetailPairs.find(p => p.master.name === t.name) : null;
+
+    function clearMaster() {
+      state.master = null;
+      renderTablePage(t);
+    }
+    function selectMaster(row) {
+      if (!row || !masterPair) {
+        state.master = null;
+      } else {
+        const pkCols = masterPair.master.primaryKeys || [];
+        const pkValues = {};
+        pkCols.forEach(c => pkValues[c] = row[c]);
+        state.master = {
+          tableName: t.name,
+          rowKey: row.__rowKey,
+          pkCols: pkCols,
+          pkValues: pkValues,
+          row: row,
+          detailTable: masterPair.detail.name,
+          prefixCols: masterPair.detail.matchingPrefix || pkCols.slice(),
+        };
+        state.detailPage = 1;
+        state.detailPageSize = 20;
+      }
+      renderTablePage(t);
+    }
+
+    let headerHint = '';
+    if (isMasterTable) {
+      headerHint = '  · master of ' + (masterPair ? masterPair.detail.name : '') + (state.master ? '  · header row selected' : '');
+    } else if (state.masterDetailPairs && state.masterDetailPairs.some(p => p.detail.name === t.name)) {
+      const detP = state.masterDetailPairs.find(p => p.detail.name === t.name);
+      const parts = detP ? (detP.detail.matchingPrefix || []).join(', ') + ' / last PK is discriminator' : '';
+      headerHint = '  · detail under ' + (detP ? detP.master.name : '') + ' (' + parts + ')';
+    }
     const header = h('header', { class: 'page' },
       h('h1', {
         html: (t.schema ? '<small>' + esc(t.schema) + '.</small>' : '') + esc(t.name),
       }, (t.hasExplicitPk && t.primaryKeys.length)
-        ? h('small', { text: ' · PK: ' + t.primaryKeys.join(', ') + ' · ' + t.columns.length + ' columns' })
-        : h('small', { text: ' · no explicit PK (' + t.columns.length + ' cols)' })),
+        ? h('small', { text: ' · PK: ' + t.primaryKeys.join(', ') + ' · ' + t.columns.length + ' columns' + headerHint })
+        : h('small', { text: ' · no explicit PK (' + t.columns.length + ' cols)' + headerHint })),
       h('div', { class: 'row-actions' },
-        h('button', { class: 'btn btn-primary btn-small', type: 'button', text: '+ New Row', onclick: () => openCreateModal(t) }),
+        h('button', { class: 'btn btn-primary btn-small', type: 'button', text: '+ New Row', onclick: () => openCreateModal(t), disabled: !!(state.master && state.master.tableName === t.name), title: state.master && state.master.tableName === t.name ? 'Cannot create a new master row while one is selected — clear selection first.' : '' }),
         t.hasExplicitPk ? null : h('span', { class: 'chip', text: 'No PK: create only' }),
+        state.master && state.master.tableName === t.name
+          ? h('button', { class: 'btn btn-small', type: 'button', text: 'Clear master selection', title: 'Remove the selected header row and return to the full master table browse.', onclick: () => clearMaster() })
+          : null,
       )
     );
     content.appendChild(header);
     content.appendChild(alerts);
     content.appendChild(pager);
     content.appendChild(tableWrap);
+    content.appendChild(mdBlock);
+
     try {
       const limit = state.pageSize;
       const offset = (state.page - 1) * state.pageSize;
-      const data = await api('GET', `/api/interpreter/tables/${encodeURIComponent(t.name)}/rows?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`);
+      const selMaster = state.master && state.master.tableName === t.name ? state.master : null;
+      const data = await api('GET', '/api/interpreter/tables/' + encodeURIComponent(t.name) + '/rows?limit=' + encodeURIComponent(limit) + '&offset=' + encodeURIComponent(offset));
       state.totalRows = Number(data.total || 0);
       renderPager(pager, t, alerts);
-      renderTableRows(tableWrap, t, data);
+      renderTableRows(tableWrap, t, data, {
+        isMasterTable: isMasterTable,
+        master: selMaster,
+        onSelectMaster: selectMaster,
+        selectedRowKey: selMaster ? selMaster.rowKey : null,
+        onlyShowSelectedRow: !!selMaster,
+        disableEditDeleteSelected: !!selMaster,
+      });
+      if (selMaster && selMaster.detailTable) {
+        await renderDetailBrowser(mdBlock, alerts, selMaster);
+      }
     } catch (e) {
       if (e && e.status === 401 && /AUTH_/.test(e.code || '')) return signOut();
       tableWrap.innerHTML = '';
@@ -1134,16 +1230,110 @@
       showAlert(alerts, 'danger', f.title, f.message, f.hints);
       const tbl = h('table', { class: 'tbl' });
       const thead = h('thead'); const tr = h('tr');
+      if (isMasterTable) tr.appendChild(h('th', { text: 'Select' }));
       (t.columns || []).forEach(c => tr.appendChild(h('th', { text: c.name })));
       tr.appendChild(h('th', { text: 'Actions' }));
       thead.appendChild(tr);
       tbl.appendChild(thead);
       const tbody = h('tbody');
+      const span = isMasterTable ? ((t.columns || []).length + 2) : ((t.columns || []).length + 1);
       tbody.appendChild(h('tr', { class: 'row-empty' },
-        h('td', { attrs: { colspan: (t.columns || []).length + 1 }, text: 'Failed to load rows' })));
+        h('td', { attrs: { colspan: span }, text: 'Failed to load rows' })));
       tbl.appendChild(tbody);
       tableWrap.appendChild(tbl);
     }
+  }
+
+  async function renderDetailBrowser(block, alerts, master) {
+    block.innerHTML = '';
+    const detTbl = (state.schema.tables || []).find(tt => tt.name === master.detailTable);
+    if (!detTbl) return;
+
+    const detailSection = h('section', { class: 'detail-browser' });
+
+    const header = h('div', { class: 'detail-head' });
+    const back = h('button', { class: 'btn btn-small btn-ghost', type: 'button', text: '✕ Clear selection', onclick: () => { state.master = null; state.detailPage = 1; renderTablePage(state.schema.tables.find(x => x.name === master.tableName) || detTbl); } });
+    const masterPkCols = master.pkCols || [];
+    const prefixCols = master.prefixCols && master.prefixCols.length ? master.prefixCols : masterPkCols;
+    const prefixChips = prefixCols.map((prefixC, i) => {
+      const masterC = masterPkCols[i] || prefixC;
+      const v = master.pkValues[masterC];
+      return h('span', { class: 'prefix-chip', title: 'Primary key prefix value, used to match detail rows.' },
+        h('span', { class: 'prefix-col' }, String(prefixC)),
+        document.createTextNode(' = '),
+        h('span', { class: 'prefix-val mono' }, String(v === null || v === undefined ? 'NULL' : v))
+      );
+    });
+    header.appendChild(h('div', { class: 'detail-head-title' },
+      h('h2', {
+        html: 'Detail rows · <small>subordinate table <code>' + esc(detTbl.name) + '</code> filtered by prefix PK match</small>',
+      }),
+      h('div', { class: 'detail-prefix' }, prefixChips)
+    ));
+    header.appendChild(back);
+    detailSection.appendChild(header);
+
+    const pager = h('div', { class: 'pager' });
+    detailSection.appendChild(pager);
+    const wrap = h('div', { class: 'table-wrap' });
+    detailSection.appendChild(wrap);
+
+    const limit = state.detailPageSize;
+    const offset = (state.detailPage - 1) * state.detailPageSize;
+    const qs = ['limit=' + encodeURIComponent(limit), 'offset=' + encodeURIComponent(offset)];
+    for (let i = 0; i < prefixCols.length; i++) {
+      const prefixC = prefixCols[i];
+      const masterC = masterPkCols[i] || prefixC;
+      const v = master.pkValues[masterC];
+      if (v === undefined || v === null) qs.push('filter.' + encodeURIComponent(prefixC) + '=');
+      else qs.push('filter.' + encodeURIComponent(prefixC) + '=' + encodeURIComponent(String(v)));
+    }
+    try {
+      const data = await api('GET', '/api/interpreter/tables/' + encodeURIComponent(detTbl.name) + '/rows?' + qs.join('&'));
+      state.detailTotalRows = Number(data.total || 0);
+      renderPagerCustom(pager, detTbl, state.detailTotalRows, state.detailPage, state.detailPageSize, (np, ns) => {
+        state.detailPage = np; state.detailPageSize = ns; renderDetailBrowser(block, alerts, master);
+      }, 'detail');
+      renderTableRows(wrap, detTbl, data);
+    } catch (e) {
+      if (e && e.status === 401 && /AUTH_/.test(e.code || '')) return signOut();
+      const f = formatErrForAlert(e);
+      showAlert(alerts, 'danger', f.title, f.message, f.hints);
+    }
+    block.appendChild(detailSection);
+  }
+
+  function renderPagerCustom(pagerEl, t, total, page, size, onChange, kind) {
+    pagerEl.innerHTML = '';
+    total = total || 0;
+    size = size || 20;
+    const totalPages = Math.max(1, Math.ceil(total / size));
+    page = Math.min(Math.max(1, page || 1), totalPages);
+    const from = total ? (page - 1) * size + 1 : 0;
+    const to = Math.min(page * size, total);
+    const prevBtn = h('button', { class: 'btn btn-small', type: 'button', text: '‹ Prev', disabled: page <= 1 });
+    prevBtn.addEventListener('click', () => { onChange(page - 1, size); });
+    const nextBtn = h('button', { class: 'btn btn-small', type: 'button', text: 'Next ›', disabled: page >= totalPages });
+    nextBtn.addEventListener('click', () => { onChange(page + 1, size); });
+    const firstBtn = h('button', { class: 'btn btn-small btn-ghost', type: 'button', text: '« First', disabled: page <= 1 });
+    firstBtn.addEventListener('click', () => { onChange(1, size); });
+    const lastBtn = h('button', { class: 'btn btn-small btn-ghost', type: 'button', text: 'Last »', disabled: page >= totalPages });
+    lastBtn.addEventListener('click', () => { onChange(totalPages, size); });
+    const sizeSel = h('select', { class: 'form-control', style: 'width:110px;padding:5px 8px' });
+    [20, 50, 100, 200].forEach(n => {
+      const o = h('option', { value: String(n), text: n + '/page' });
+      if (n === size) o.selected = true;
+      sizeSel.appendChild(o);
+    });
+    sizeSel.addEventListener('change', () => { onChange(1, Number(sizeSel.value) || 20); });
+    pagerEl.appendChild(firstBtn);
+    pagerEl.appendChild(prevBtn);
+    pagerEl.appendChild(nextBtn);
+    pagerEl.appendChild(lastBtn);
+    pagerEl.appendChild(sizeSel);
+    pagerEl.appendChild(h('span', { class: 'page-indicator' + (kind === 'detail' ? ' detail' : '') },
+      { html: 'Showing <strong>' + esc(String(from)) + '-' + esc(String(to)) + '</strong> of <strong>' + esc(String(total)) + '</strong> detail rows · Page <strong>' + esc(String(page)) + '</strong> / ' + esc(String(totalPages)) }
+    ));
   }
 
   function renderPager(pagerEl, t, alertsEl) {
@@ -1184,52 +1374,119 @@
     }));
   }
 
-  function renderTableRows(wrap, t, data) {
+  function renderTableRows(wrap, t, data, opts) {
     wrap.innerHTML = '';
     const cols = t.columns;
+    const pkSet = new Set(t.primaryKeys || []);
+    const isMasterTable = (opts && opts.isMasterTable) || false;
+    const master = (opts && opts.master) || null;
+    const hideActions = (opts && opts.hideActions) || false;
+    const disableEditDeleteSelected = (opts && opts.disableEditDeleteSelected) || false;
+    const onSelectMaster = (opts && opts.onSelectMaster) || null;
+    const selectedRowKey = (opts && opts.selectedRowKey) || null;
+    const onlyShowSelectedRow = (opts && opts.onlyShowSelectedRow) || false;
+
     const tbl = h('table', { class: 'tbl' });
     const thead = h('thead');
     const htr = h('tr');
+    if (isMasterTable) {
+      const selTh = h('th', { class: 'col-master-select', title: 'Select a master row to lock and view its subordinate detail rows below.' }, 'Select');
+      htr.appendChild(selTh);
+    }
     cols.forEach(c => {
-      const meta = [];
-      if (t.primaryKeys.includes(c.name)) meta.push('PK');
-      if (c.typeClass && c.typeClass !== 'text') meta.push(c.typeClass);
-      if (!c.isNullable) meta.push('NOT NULL');
-      const head = h('th', {}, c.name + (meta.length ? ('  · ' + meta.join(' / ')) : ''));
+      const isPk = pkSet.has(c.name);
+      const cname = (c.dataType ? String(c.dataType).toLowerCase() : '') + (c.udtName && c.udtName !== c.dataType ? ' (' + c.udtName.toLowerCase() + ')' : '');
+      const titleLines = [];
+      if (cname) titleLines.push('Type: ' + cname);
+      if (c.typeClass && c.typeClass !== 'text') titleLines.push('Class: ' + c.typeClass);
+      titleLines.push('Nullable: ' + (c.isNullable ? 'YES' : 'NO (NOT NULL)'));
+      if (c.characterMaximumLength) titleLines.push('Max length: ' + c.characterMaximumLength);
+      if (c.numericPrecision != null) titleLines.push('Numeric precision: ' + c.numericPrecision + (c.numericScale ? ' (scale ' + c.numericScale + ')' : ''));
+      if (c.default) titleLines.push('Default: ' + String(c.default));
+      if (c.isIdentity) titleLines.push('IDENTITY ' + (c.identityGeneration || 'DEFAULT'));
+      const head = h('th', {
+        class: (isPk ? ' pk-col-head' : '') + (c.isNullable ? '' : ' notnull-head'),
+        title: titleLines.join('\n'),
+      });
+      if (isPk) {
+        head.appendChild(h('span', { class: 'pk-icon', title: 'Primary key column (' + t.primaryKeys.join(', ') + ')' }, '🔑'));
+        head.appendChild(h('span', { class: 'pk-label' }, '  '));
+      }
+      const nm = h('span', {
+        class: (isPk ? 'pk-name' : 'col-name'),
+        html: esc(c.name),
+      });
+      head.appendChild(nm);
+      const tag = h('span', {
+        class: 'type-tag' + (c.isNullable ? '' : ' notnull'),
+        title: titleLines.join('\n'),
+        text: (c.typeClass || c.dataType || 'text') + (c.isNullable ? ' · NULL' : ' · NOT NULL'),
+      });
+      head.appendChild(h('span', { class: 'head-tag-wrap' }, tag));
       htr.appendChild(head);
     });
-    htr.appendChild(h('th', { text: 'Actions' }));
+    if (!hideActions) htr.appendChild(h('th', { text: 'Actions' }));
     thead.appendChild(htr);
     tbl.appendChild(thead);
     const tbody = h('tbody');
-    if (!data.rows || !data.rows.length) {
-      tbody.appendChild(h('tr', { class: 'row-empty' }, h('td', { text: 'No rows. Click + New Row to create one.' })));
+    let rows = (data && data.rows) || [];
+    if (onlyShowSelectedRow && selectedRowKey) {
+      rows = rows.filter(r => String(r.__rowKey) === String(selectedRowKey));
+    }
+    if (!rows || !rows.length) {
+      const span = isMasterTable ? (cols.length + 1) : cols.length;
+      const tspan = hideActions ? span : span + 1;
+      tbody.appendChild(h('tr', { class: 'row-empty' }, h('td', { attrs: { colspan: tspan }, text: onlyShowSelectedRow ? 'No selected master row.' : 'No rows. Click + New Row to create one.' })));
     } else {
-      const typeMap = data.typeMap || {};
-      data.rows.forEach(row => {
-        const tr = h('tr');
+      const typeMap = (data && data.typeMap) || {};
+      rows.forEach(row => {
+        const tr = h('tr', { class: (selectedRowKey && String(row.__rowKey) === String(selectedRowKey)) ? 'row-selected-master' : '' });
+        if (isMasterTable) {
+          const selCell = h('td', { class: 'col-master-select' });
+          const isSelected = selectedRowKey && String(row.__rowKey) === String(selectedRowKey);
+          const rdb = h('button', {
+            class: 'btn btn-small' + (isSelected ? ' btn-primary selected' : ' btn-ghost'),
+            type: 'button',
+            text: isSelected ? '✓ Selected' : 'Use as header',
+            title: isSelected ? 'This row is currently selected as the master header row. Clear the selection to edit it.' : 'Select this master row; other rows will be hidden, and the subordinate detail table is shown below filtered by the prefix keys of the composite PK.',
+          });
+          rdb.addEventListener('click', () => { if (onSelectMaster) onSelectMaster(isSelected ? null : row); });
+          selCell.appendChild(rdb);
+          tr.appendChild(selCell);
+        }
         cols.forEach(c => {
+          const isPk = pkSet.has(c.name);
           const d = display(row[c.name], typeMap[c.name]);
           const cls = [];
           if (d.null) cls.push('null');
           if (d.mono) cls.push('mono');
-          const cell = h('td', { class: cls.join(' ') }, d.text || '');
-          if (d.title) cell.setAttribute('title', d.title);
+          if (isPk) cls.push('pk-col');
+          if (isPk && c.isNullable) cls.push('pk-null');
+          const cell = h('td', {
+            class: cls.join(' '),
+            title: isPk ? ('Primary key column · ' + (c.dataType ? c.dataType : '')) : (d.title || ''),
+          }, d.text || '');
+          if (d.title && !isPk) cell.setAttribute('title', d.title);
           tr.appendChild(cell);
         });
-        const actions = h('td', { class: 'action-cell' });
-        const key = row.__rowKey;
-        if (t.hasExplicitPk) {
-          const edit = h('button', { class: 'btn btn-small', type: 'button', text: 'Edit' });
-          edit.addEventListener('click', () => openEditModal(t, row, key));
-          actions.appendChild(edit);
-          const del = h('button', { class: 'btn btn-small btn-danger', type: 'button', text: 'Delete' });
-          del.addEventListener('click', () => openDeleteModal(t, row, key));
-          actions.appendChild(del);
+        if (hideActions) {
+          /* skip actions column */
         } else {
-          actions.appendChild(h('span', { class: 'chip', text: 'No PK' }));
+          const actions = h('td', { class: 'action-cell' });
+          const key = row.__rowKey;
+          const disableButtons = disableEditDeleteSelected && selectedRowKey && String(row.__rowKey) === String(selectedRowKey);
+          if (t.hasExplicitPk) {
+            const edit = h('button', { class: 'btn btn-small', type: 'button', text: 'Edit', disabled: disableButtons, title: disableButtons ? 'Cannot edit the row while it is the selected master header row. Clear selection first.' : '' });
+            if (!disableButtons) edit.addEventListener('click', () => openEditModal(t, row, key));
+            actions.appendChild(edit);
+            const del = h('button', { class: 'btn btn-small btn-danger', type: 'button', text: 'Delete', disabled: disableButtons, title: disableButtons ? 'Cannot delete the row while it is the selected master header row. Clear selection first.' : '' });
+            if (!disableButtons) del.addEventListener('click', () => openDeleteModal(t, row, key));
+            actions.appendChild(del);
+          } else {
+            actions.appendChild(h('span', { class: 'chip', text: 'No PK' }));
+          }
+          tr.appendChild(actions);
         }
-        tr.appendChild(actions);
         tbody.appendChild(tr);
       });
     }
