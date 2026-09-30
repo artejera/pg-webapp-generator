@@ -6,6 +6,13 @@
       "createdAt": "2026-09-29T22:30:39.632Z",
       "salt": "fe6597f06f1cab488af411fa3c0538ea",
       "hash": "d4afad3998d738970d1ea21af77b15c83106fa51905b7da1e1cdb2506c7fc48e"
+    },
+    {
+      "username": "mpalacios",
+      "role": "admin",
+      "createdAt": "2026-09-30T00:36:16.858Z",
+      "salt": "e7d99796a0321d8a732ebf099614e05c",
+      "hash": "1469f943ed842846a152da40bc6a017516378683ff9f99d87c2a3f97c33bb66b"
     }
   ]
 }
