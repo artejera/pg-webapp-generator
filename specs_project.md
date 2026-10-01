@@ -55,24 +55,68 @@ do not automatically erase files with extensions .md or .sql [ also not extensio
 ## Authentication and Authorization: 
 ``` commit c38615258b6d74f8725cbf1b1cc9311a93607559 (HEAD -> main, origin/main) ```
   - user/pass authentication, 
-     - user table  
-        - username 
-        - password (stored with one-way-encription) 
-        - role 
-          - 'admin' is able to edit any user and any field 
-          - 'normal' can only edit its own password 
+    - implement user table independent of the database credentials:
+      - username 
+      - password (stored with one-way-encription) 
+      - role 
+        - 'admin' is able to edit any user and any field 
+        - 'normal' can only edit its own password 
+  - ***TODO***:  revert authentication to database credentials, discard user table
+    - ***TODO***:  display user in page header, along with software version and today's date&time
+    - ***TODO***:  enable user to log out
+    - ***TODO***: enable user complete name stored in pg user description
+    - ***TODO***:  enable user to change its password and its name(description)
 ## Other requests
   - enable a database schema selector (UI) 
   - define and display a software version timestamp: 
     - format yymmdd.hhmm 
   - update SPECIFICATION.md 
-  - report the time elapsed doing this task 
 <hr/><br/>
 
-# STILL TODO
+# STILL ***TODO***
 
-## TO-DO search widget
+## TO-DO further master-detail
+- enable nested master-detail, so for example, if you may have:
+  - a master table 'countries' with key 'country_id'
+  - a detail table 'federated states' with keys 'country_id', 'state_id'
+  - a detail table 'counties' with keys 'country_id', 'state_id', 'county_id'
+- enable alternate master-detail, so for example, if you may have:
+  - a master table 'countries' with key 'country_id'
+  - a detail table 'federated states' with keys 'country_id', 'state_id'
+  - an alternate detail table 'sales region' with keys 'country_id', 'region_id'
 
+## Drill-down on foreign keys
+  - For cases of a table browser, displaying a field refering to a foreign key, and only for the case of the least significant key of the foreign table, enable drill-down to a form displaying more fields of the foreign tuple, read-only. 
+
+  - For cases of a table browser, displaying a field refering to a foreign key, and only for the case of the least significant key of the foreign table, enable drill-down to a form displaying more fields of the foreign tuple, read-only. 
+
+  - For cases of a form In the row form, enable key selection displaying a subordinate table row browser for the referenced table
+
+## TO-DO search form
+  The table browser displays will have an extra state: 'searching', with a special button, which:
+  - will cause the table browser to enter the 'searching' state
+  - will cause the display of a search form
+    - with the same fields of a normal form
+    - with its field values initialized to blanks, so that the user can input search criteria,
+    - The search values understand patterns similar to sql's 'like'.
+  - When the user submits the search form
+    - the base table browser is filtered to show only the rows whose values match the search criteria.
+    - When the user cancels the search, then the table browser is reset to show all rows, and the 'searching' state is exited.
+  - if the base table browser is a 'detail table', the key fields fixed by its relation to its 'master table', are not searchable.
+
+## TODO: Cancel-Escape button
+  Plan for a button that may be used to pop states
+  - pop 'searching' state of table browser
+  - pop cancel search form of table browser
+  - pop detail table browser and return to its master table browser
+  - pop cancel edit form of table browser
+  - its final base state is the connected state with selection of schema and table
+
+## TODO: LIMITS
+    report an error if a limit is exceeded
+  - maximum number of rows displayed in a table browser is 1000
+  - maximum time to execute a query is 10 seconds
+  
 ## TO-DO SQL EXPRESSIONS:
   - sql-expression execution
   - sql-expression catalog
