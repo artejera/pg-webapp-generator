@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HotX - PG DDL Interpreter</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; background: #f4f4f8; color: #222; }
+
+/* ---------- LOGIN ---------- */
+.login-overlay { position: fixed; inset: 0; background: rgba(74,21,75,0.85); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.login-card { background: #fff; border-radius: 10px; padding: 28px 32px; width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+.login-card h1 { font-size: 20px; color: #4A154B; margin-bottom: 4px; }
+.login-card .sub { color: #666; font-size: 12px; margin-bottom: 18px; }
+.login-card label { display: block; margin-top: 10px; font-size: 12px; color: #444; font-weight: 600; }
+.login-card input { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 5px; margin-top: 4px; font-size: 13px; }
+.login-card input:focus { outline: none; border-color: #611f62; box-shadow: 0 0 0 2px rgba(97,31,98,0.2); }
+.login-card .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.btn-login { width: 100%; margin-top: 20px; padding: 10px; background: #4A154B; color: white; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; }
+.btn-login:hover { background: #611f62; }
+.btn-login:disabled { background: #aaa; cursor: not-allowed; }
+.login-error { margin-top: 12px; color: #c0392b; font-size: 12px; min-height: 16px; }
+
+/* ---------- HEADER ---------- */
+.header { background: #4A154B; color: white; padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.header .logo { font-weight: 700; font-size: 16px; letter-spacing: 1px; }
+.header .chip { background: rgba(255,255,255,0.15); padding: 4px 10px; border-radius: 14px; font-size: 11px; }
+.header select, .header button { padding: 4px 8px; font-size: 12px; border-radius: 4px; border: none; cursor: pointer; }
+.header select { background: white; color: #333; min-width: 120px; }
+.header .btn-logout { background: #c0392b; color: white; }
+.header .btn-logout:hover { background: #e74c3c; }
+.header .ver { font-size: 10px; opacity: 0.8; font-family: monospace; margin-left: auto; }
+.txn-controls { display: inline-flex; gap: 4px; }
+.txn-controls button { font-size: 11px; padding: 3px 8px; }
+.btn-begin { background: #27ae60; color: white; }
+.btn-commit { background: #2980b9; color: white; }
+.btn-rollback { background: #e67e22; color: white; }
+.txn-badge { background: #f39c12; color: #000; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px; }
+
+/* ---------- MAIN CONTENT ---------- */
+.content { padding: 16px; }
+
+/* ---------- BROWSER CARD ---------- */
+.browser-card { background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 14px; overflow: hidden; }
+.browser-card.depth-1 { border-left: 4px solid #3498db; }
+.browser-card.depth-2 { border-left: 4px solid #27ae60; }
+.browser-card.depth-3 { border-left: 4px solid #8e44ad; }
+.browser-card.depth-alt { border-left: 4px solid #9b59b6; }
+.browser-header { padding: 10px 14px; background: #f8f8fb; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.browser-title { font-weight: 700; font-size: 14px; color: #2c3e50; }
+.browser-title .alt-badge { background: #9b59b6; color: white; font-size: 10px; padding: 2px 8px; border-radius: 10px; margin-left: 6px; font-weight: 500; }
+.browser-title .schema-tag { font-size: 11px; color: #7f8c8d; font-weight: 400; }
+.lock-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.lock-chip { background: #fff3cd; border: 1px solid #ffc107; color: #856404; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.lock-chip::before { content: '🔒 '; }
+.browser-actions { margin-left: auto; display: flex; gap: 5px; }
+.icon-btn { width: 28px; height: 28px; border: 1px solid #ddd; background: white; border-radius: 5px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; position: relative; }
+.icon-btn:hover { background: #f0f0f5; }
+.icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.icon-btn.danger:hover { background: #ffebee; border-color: #e57373; }
+.icon-btn.primary:hover { background: #e3f2fd; border-color: #64b5f6; }
+.icon-btn.success:hover { background: #e8f5e9; border-color: #81c784; }
+.icon-btn.warn:hover { background: #fff3e0; border-color: #ffb74d; }
+.tooltip { position: relative; }
+.tooltip:hover::after { content: attr(data-tip); position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%); background: #222; color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; z-index: 100; pointer-events: none; }
+
+/* ---------- TABLE ---------- */
+.table-wrap { max-height: 500px; overflow: auto; }
+table.data { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.data th { background: #ecf0f1; position: sticky; top: 0; padding: 8px 10px; text-align: left; border-bottom: 2px solid #bdc3c7; font-weight: 600; white-space: nowrap; z-index: 2; cursor: default; }
+table.data th.pk-col { background: #d6eaf8; border-bottom-color: #5dade2; }
+table.data th .dtype { font-size: 10px; color: #7f8c8d; font-weight: 400; }
+table.data td { padding: 6px 10px; border-bottom: 1px solid #eee; vertical-align: middle; }
+table.data td.pk-col { background: #f0f7fc; font-weight: 600; }
+table.data td.actions { white-space: nowrap; width: 1px; background: #fafbfc; }
+table.data tr:hover td { background: #f5f8ff; }
+table.data tr:hover td.pk-col { background: #e3f0fb; }
+table.data tr.master-row td { background: #fff8e1 !important; }
+table.data tr.master-row td.pk-col { background: #ffe8a3 !important; }
+table.data .null-val { color: #bbb; font-style: italic; }
+.col-actions-header { text-align: center !important; }
+
+/* ---------- PAGINATION ---------- */
+.pagination { padding: 8px 14px; background: #fafbfc; border-top: 1px solid #eee; display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.pagination .spacer { flex: 1; }
+.pagination .info { color: #666; }
+
+/* ---------- FORMS (inline panel, user pref: inline not modal) ---------- */
+.form-panel { border-top: 2px solid #611f62; padding: 14px; background: #faf8fc; }
+.form-panel h3 { font-size: 13px; margin-bottom: 12px; color: #4A154B; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 16px; }
+.form-field label { display: block; font-size: 11px; font-weight: 600; color: #555; margin-bottom: 3px; }
+.form-field label.pk { color: #2874a6; }
+.form-field label.locked::after { content: ' 🔒'; }
+.form-field input, .form-field select, .form-field textarea { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; font-family: inherit; }
+.form-field input:disabled, .form-field select:disabled { background: #eceff1; color: #555; }
+.form-field input[type="checkbox"] { width: auto; }
+.form-field .hint { font-size: 10px; color: #888; margin-top: 2px; }
+.form-buttons { margin-top: 14px; display: flex; gap: 6px; justify-content: flex-end; }
+.form-buttons.left { justify-content: flex-start; }
+.btn { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: #4A154B; color: white; }
+.btn-primary:hover { background: #611f62; }
+.btn-accept { background: #27ae60; color: white; }
+.btn-accept:hover { background: #2ecc71; }
+.btn-cancel { background: #95a5a6; color: white; }
+.btn-cancel:hover { background: #7f8c8d; }
+.btn-danger { background: #c0392b; color: white; }
+.btn-danger:hover { background: #e74c3c; }
+.btn-warn { background: #e67e22; color: white; }
+.btn-warn:hover { background: #f39c12; }
+
+/* ---------- ERROR / WARNING BANNERS ---------- */
+.banner { padding: 8px 14px; font-size: 12px; border-left: 4px solid; }
+.banner.error { background: #fdecea; border-color: #e74c3c; color: #922b21; }
+.banner.warn { background: #fef9e7; border-color: #f39c12; color: #7d6608; }
+.banner.info { background: #eaf2f8; border-color: #3498db; color: #1a5276; }
+
+/* ---------- TOASTS / POPUPS ---------- */
+.toasts { position: fixed; top: 60px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
+.toast { background: #2c3e50; color: white; padding: 10px 16px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); font-size: 12px; max-width: 400px; animation: slideIn 0.25s ease; }
+.toast.error { background: #c0392b; }
+.toast.success { background: #27ae60; }
+.toast.warn { background: #e67e22; }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1500; display: flex; align-items: center; justify-content: center; }
+.modal { background: white; border-radius: 8px; padding: 20px 24px; max-width: 480px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+.modal h3 { margin-bottom: 12px; color: #4A154B; }
+.modal .modal-body { margin-bottom: 16px; white-space: pre-wrap; word-break: break-word; font-size: 13px; color: #333; }
+.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ---------- EMPTY ---------- */
+.empty { padding: 40px; text-align: center; color: #999; font-size: 13px; }
+.empty.large { padding: 80px; font-size: 15px; }
+.empty.large .emoji { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+<div id="toasts" class="toasts"></div>
+<div id="modal-root"></div>
+
+<script>
+/* ================================================================
+ * HotX - Pure PG DDL Interpreter Frontend
+ * No code generation. All UI derived at runtime from metadata.
+ * ================================================================ */
+
+const API = '';
+const state = {
+  sessionId: localStorage.getItem('hotx_sid') || null,
+  creds: null,
+  schemas: [],
+  currentSchema: localStorage.getItem('hotx_schema') || 'public',
+  tables: [],
+  currentTable: localStorage.getItem('hotx_table') || null,
+  columns: null,           // for current root table
+  fks: null,               // [{child_schema, child_table, parent_schema, parent_table, child_columns[], parent_columns[]}]
+  version: null,
+  txnActive: false,
+  /* master-detail stack:
+     [ {table, schema, columns, pkColumns, masterRow, filters:[{column,value}], depth, alternateOf? }, ... ]
+     first entry = root table browser (no masterRow, no filters)
+   */
+  stack: [],
+  /* stack[i].editing = {mode:'edit'|'create', data:{...}}
+     stack[i].searching = {active:true, criteria:[{column, value}]}
+  */
+};
+
+/* ---------- Utilities ---------- */
+const $ = (sel, el=document) => el.querySelector(sel);
+const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
+const esc = s => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+async function api(path, opts={}) {
+  const url = API + path;
+  const headers = { 'Content-Type': 'application/json' };
+  if (state.sessionId && !opts.noSession) headers['X-Session-Id'] = state.sessionId;
+  const body = opts.body ? JSON.stringify({ sessionId: state.sessionId, ...opts.body }) : undefined;
+  const method = opts.method || (opts.body ? 'POST' : 'GET');
+  const qs = opts.query ? ('?'+new URLSearchParams({ sessionId: state.sessionId, ...opts.query }).toString()) : '';
+  const res = await fetch(url+qs, { method, headers, body });
+  const json = await res.json().catch(()=>({ok:false,error:'Non-JSON response'}));
+  if (!json.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json.data;
+}
+
+function toast(msg, kind='info', ms=3500) {
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.textContent = msg;
+  $('#toasts').appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; el.style.transform='translateX(100%)'; el.style.transition='all 0.3s'; setTimeout(()=>el.remove(), 300); }, ms);
+}
+
+function showConfirm(title, body, {confirmText='OK', cancelText='Cancel', danger=false}={}) {
+  return new Promise(resolve => {
+    const back = document.createElement('div');
+    back.className = 'modal-backdrop';
+    back.innerHTML = `
+      <div class="modal">
+        <h3>${esc(title)}</h3>
+        <div class="modal-body">${esc(body)}</div>
+        <div class="modal-actions">
+          <button class="btn btn-cancel" data-act="cancel">${esc(cancelText)}</button>
+          <button class="btn ${danger?'btn-danger':'btn-accept'}" data-act="ok">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    $('#modal-root').appendChild(back);
+    back.addEventListener('click', e => {
+      if (e.target === back || e.target.dataset.act === 'cancel') { back.remove(); resolve(false); }
+      if (e.target.dataset.act === 'ok') { back.remove(); resolve(true); }
+    });
+  });
+}
+
+/* ---------- Root render ---------- */
+function render() {
+  const app = $('#app');
+  if (!state.sessionId || !state.creds) {
+    app.innerHTML = renderLogin();
+    attachLoginHandlers();
+    return;
+  }
+  app.innerHTML = renderHeader() + renderContent();
+  attachHeaderHandlers();
+  attachContentHandlers();
+}
+
+/* ---------- LOGIN ---------- */
+function renderLogin() {
+  return `
+  <div class="login-overlay">
+    <div class="login-card">
+      <h1>HotX</h1>
+      <div class="sub">PG DDL Interpreter — Pure Runtime</div>
+      <label>Username
+        <input id="lg-user" value="${esc(localStorage.getItem('hotx_user')||'postgres')}" autocomplete="username">
+      </label>
+      <label>Password
+        <input id="lg-pass" type="password" autocomplete="current-password">
+      </label>
+      <div class="row2">
+        <label>Host
+          <input id="lg-host" value="${esc(localStorage.getItem('hotx_host')||'localhost')}">
+        </label>
+        <label>Port
+          <input id="lg-port" value="${esc(localStorage.getItem('hotx_port')||'5432')}" type="number">
+        </label>
+      </div>
+      <label>Database
+        <input id="lg-db" value="${esc(localStorage.getItem('hotx_db')||'postgres')}">
+      </label>
+      <button class="btn-login" id="lg-submit">Connect</button>
+      <div class="login-error" id="lg-err"></div>
+    </div>
+  </div>`;
+}
+
+function attachLoginHandlers() {
+  const submit = async () => {
+    const userEl = $('#lg-user'), passEl = $('#lg-pass'), hostEl = $('#lg-host'),
+          portEl = $('#lg-port'), dbEl = $('#lg-db'),
+          btnEl = $('#lg-submit'), errEl = $('#lg-err');
+    if (!userEl || !btnEl) return;
+    const user = userEl.value.trim();
+    const password = passEl.value;
+    const host = hostEl.value.trim();
+    const port = portEl.value.trim();
+    const database = dbEl.value.trim();
+    if (errEl) errEl.textContent = '';
+    btnEl.disabled = true;
+    try {
+      const data = await api('/api/login', { body: { user, host, port, database, password } });
+      state.sessionId = data.sessionId;
+      state.creds = { user: data.user, host: data.host, port: data.port, database: data.database };
+      localStorage.setItem('hotx_sid', state.sessionId);
+      localStorage.setItem('hotx_user', user);
+      localStorage.setItem('hotx_host', host);
+      localStorage.setItem('hotx_port', port);
+      localStorage.setItem('hotx_db', database);
+      const v = await api('/api/version');
+      state.version = v.version;
+      await refreshSchemas();
+      await refreshTxnStatus();
+      toast('Connected', 'success');
+      render();
+    } catch (e) {
+      if (errEl) errEl.textContent = e.message;
+    } finally {
+      const btn = $('#lg-submit');
+      if (btn) btn.disabled = false;
+    }
+  };
+  const sb = $('#lg-submit');
+  if (sb) sb.onclick = submit;
+  ['lg-user','lg-pass','lg-host','lg-port','lg-db'].forEach(id => {
+    const el = $('#'+id);
+    if (el) el.addEventListener('keydown', e => { if (e.key==='Enter') submit(); });
+  });
+}
+
+/* ---------- HEADER ---------- */
+function renderHeader() {
+  const c = state.creds || {};
+  const schemasOpts = state.schemas.map(s => `<option value="${esc(s)}" ${s===state.currentSchema?'selected':''}>${esc(s)}</option>`).join('');
+  const tablesOpts = state.tables.map(t => `<option value="${esc(t.table_name)}" ${t.table_name===state.currentTable?'selected':''}>${esc(t.table_name)}${t.has_primary_key?'':' ⚠️'}</option>`).join('');
+  return `
+  <div class="header">
+    <div class="logo">⚡ HotX</div>
+    <div class="chip" title="Credentials">${esc(c.user||'?')}@${esc(c.host||'?')}:${c.port||'?'}/${esc(c.database||'?')}</div>
+    <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+      Schema
+      <select id="hdr-schema">${state.schemas.length?schemasOpts:'<option value="">(none)</option>'}</select>
+    </label>
+    <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+      Table
+      <select id="hdr-table">${state.tables.length?tablesOpts:'<option value="">(no tables)</option>'}</select>
+    </label>
+    <div class="txn-controls" id="txn-ctrls">
+      ${state.txnActive
+        ? `<span class="txn-badge">TXN ACTIVE</span>
+           <button class="btn-commit" data-txn="commit">Commit</button>
+           <button class="btn-rollback" data-txn="rollback">Rollback</button>`
+        : `<button class="btn-begin" data-txn="begin">Begin TXN</button>`}
+    </div>
+    <button class="btn-logout" id="hdr-logout">Logout</button>
+    <div class="ver">v${esc(state.version||'')}</div>
+  </div>`;
+}
+
+function attachHeaderHandlers() {
+  $('#hdr-schema').onchange = async (e) => {
+    state.currentSchema = e.target.value;
+    state.currentTable = null;
+    state.stack = [];
+    localStorage.setItem('hotx_schema', state.currentSchema);
+    localStorage.removeItem('hotx_table');
+    await refreshTables();
+    render();
+  };
+  $('#hdr-table').onchange = async (e) => {
+    state.currentTable = e.target.value || null;
+    if (state.currentTable) localStorage.setItem('hotx_table', state.currentTable);
+    else localStorage.removeItem('hotx_table');
+    state.stack = [];
+    if (state.currentTable) {
+      try {
+        await initRootBrowser();
+      } catch(e) { toast(e.message, 'error'); }
+    }
+    render();
+  };
+  $('#hdr-logout').onclick = doLogout;
+  $$('#txn-ctrls [data-txn]').forEach(b => b.onclick = async () => {
+    const act = b.dataset.txn;
+    try {
+      if (act === 'begin') { await api('/api/txn/begin'); toast('Transaction started', 'success'); }
+      if (act === 'commit') {
+        try {
+          await api('/api/txn/commit');
+          toast('Committed', 'success');
+        } catch(e) {
+          showConfirm('Commit failed', e.message, {confirmText:'OK', cancelText:null, danger:true});
+        }
+      }
+      if (act === 'rollback') {
+        const ok = await showConfirm('Rollback?', 'All uncommitted changes will be discarded.', {confirmText:'Rollback', danger:true});
+        if (!ok) return;
+        await api('/api/txn/rollback');
+        toast('Rolled back', 'warn');
+      }
+      await refreshTxnStatus();
+      if (state.currentTable) { try { await initRootBrowser(); } catch(_){} }
+      render();
+    } catch(e) { toast(e.message, 'error'); render(); }
+  });
+}
+
+async function doLogout() {
+  const ok = await showConfirm('Logout?', 'Disconnect from the database and return to login.', {confirmText:'Logout'});
+  if (!ok) return;
+  try { await api('/api/logout'); } catch(_){}
+  state.sessionId = null;
+  state.creds = null;
+  state.stack = [];
+  state.tables = [];
+  state.schemas = [];
+  state.currentTable = null;
+  localStorage.removeItem('hotx_sid');
+  render();
+}
+
+/* ---------- Data refreshers ---------- */
+async function refreshSchemas() {
+  state.schemas = await api('/api/schemas');
+  if (!state.schemas.includes(state.currentSchema)) state.currentSchema = state.schemas[0] || 'public';
+  await refreshTables();
+}
+async function refreshTables() {
+  state.tables = await api('/api/tables', { query: { schema: state.currentSchema } });
+  if (!state.tables.find(t => t.table_name === state.currentTable)) state.currentTable = null;
+}
+async function refreshTxnStatus() {
+  try { const r = await api('/api/txn/status'); state.txnActive = r.active; } catch(_){ state.txnActive = false; }
+}
+
+/* ---------- Master-detail metadata ---------- */
+function getPkCols(columns) {
+  return columns.filter(c=>c.is_primary_key).sort((a,b)=>a.pk_ordinal-b.pk_ordinal).map(c=>c.column_name);
+}
+function getCol(columns, name) { return columns.find(c => c.column_name === name); }
+
+/* Given a potential parent table (with its columns), find all child tables in state.fks
+   where the FK's first N columns match a strict PREFIX of the child's PK.
+   Returns: [{child_table, fk_cols[], parent_cols[], isAlternateIdx:number, totalAlternates:number}]
+*/
+function findDetailTables(parentTable, parentColumns) {
+  const parentPk = getPkCols(parentColumns);
+  // group fks by (child_table) where child's leading FK cols == parent's PK (as prefix)
+  const results = [];
+  const byChild = new Map();
+  for (const fk of state.fks) {
+    if (fk.parent_schema !== state.currentSchema) continue;
+    if (fk.parent_table !== parentTable) continue;
+    // fk.child_columns must match parentPk at the beginning (same order, same length)
+    const fkCols = fk.child_columns;
+    if (fkCols.length !== parentPk.length) continue;
+    // order-sensitive: the FK col order must map to the parent PK col order
+    const ok = fk.parent_columns.every((pc, i) => parentPk[i] === pc);
+    if (!ok) continue;
+    if (!byChild.has(fk.child_table)) byChild.set(fk.child_table, []);
+    byChild.get(fk.child_table).push(fk);
+  }
+  // convert map to list, mark alternates
+  const arr = Array.from(byChild.entries()).map(([tbl, fks]) => ({ child_table: tbl, fk: fks[0] }));
+  const totalAlternates = arr.length;
+  arr.forEach((r, i) => {
+    results.push({
+      child_table: r.child_table,
+      fk_cols: r.fk.child_columns,
+      parent_cols: r.fk.parent_columns,
+      alternateIdx: totalAlternates > 1 ? i + 1 : 0,
+      totalAlternates
+    });
+  });
+  return results;
+}
+
+/* ---------- Browser initialization ---------- */
+async function loadColumnsAndFks() {
+  const [{columns}, fks] = await Promise.all([
+    api('/api/columns', { query: { schema: state.currentSchema, table: state.currentTable } }),
+    api('/api/foreign-keys', { query: { schema: state.currentSchema } })
+  ]);
+  state.columns = columns;
+  state.fks = fks;
+}
+
+async function initRootBrowser() {
+  await loadColumnsAndFks();
+  const tableInfo = state.tables.find(t=>t.table_name===state.currentTable);
+  if (!tableInfo || !tableInfo.has_primary_key) {
+    // Still allow push but will render error banner
+  }
+  state.stack = [{
+    schema: state.currentSchema,
+    table: state.currentTable,
+    columns: state.columns,
+    pkColumns: getPkCols(state.columns),
+    hasPk: !!(tableInfo && tableInfo.has_primary_key),
+    masterRow: null,
+    filters: [],
+    depth: 0,
+    alternateIdx: 0,
+    totalAlternates: 0,
+    rows: null, total: 0, clamped: false,
+    editing: null,
+    searching: null,
+    page: 0, pageSize: 100,
+    error: null
+  }];
+  await reloadBrowserRows(0);
+}
+
+/* Loads rows for all browsers in the stack that are currently active (i.e., have masterRow set if not root) */
+async function reloadBrowserRows(stackIdx) {
+  const entry = state.stack[stackIdx];
+  try {
+    entry.error = null;
+    let filters = entry.filters || [];
+    const search = entry.searching && entry.searching.criteria.filter(c => c.value && String(c.value).length);
+    if (search && search.length) filters = filters.concat(search);
+    const data = await api('/api/rows', { body: {
+      schema: entry.schema,
+      table: entry.table,
+      filters,
+      orderBy: entry.pkColumns.map(col=>({column:col,desc:false})),
+      limit: entry.pageSize,
+      offset: entry.page * entry.pageSize
+    }});
+    entry.rows = data.rows;
+    entry.total = data.total;
+    entry.clamped = data.clamped;
+  } catch (e) {
+    entry.error = e.message;
+    entry.rows = [];
+    entry.total = 0;
+  }
+}
+
+/* Pop everything after idx from stack (e.g., when master row changes) */
+function truncateStackAfter(idx) {
+  state.stack = state.stack.slice(0, idx + 1);
+}
+
+/* When user clicks "use as master row" on a row in browser[idx], find its detail tables,
+   add browser entries for them below, truncate any existing further entries. */
+async function activateMasterRow(idx, rowIndex) {
+  const entry = state.stack[idx];
+  const row = entry.rows[rowIndex];
+  entry.masterRow = row;
+  entry.masterRowIndex = rowIndex;
+  truncateStackAfter(idx);
+
+  const details = findDetailTables(entry.table, entry.columns);
+  if (!details.length) {
+    toast('No detail tables found via FK prefix match', 'warn');
+    return;
+  }
+  // Load child columns + add entries
+  for (const d of details) {
+    const {columns} = await api('/api/columns', { query: { schema: entry.schema, table: d.child_table } });
+    // Lock-chips: the columns matching fk_cols, prefilled from master row
+    const filters = d.fk_cols.map((col, i) => ({ column: col, op: '=', value: row[d.parent_cols[i]] }));
+    state.stack.push({
+      schema: entry.schema,
+      table: d.child_table,
+      columns,
+      pkColumns: getPkCols(columns),
+      hasPk: columns.some(c=>c.is_primary_key),
+      masterRow: null,
+      masterRowIndex: null,
+      filters,
+      depth: entry.depth + 1,
+      alternateIdx: d.alternateIdx,
+      totalAlternates: d.totalAlternates,
+      rows: null, total: 0, clamped: false,
+      editing: null,
+      searching: null,
+      page: 0, pageSize: 100,
+      error: null
+    });
+    await reloadBrowserRows(state.stack.length - 1);
+  }
+  toast(`Activated ${details.length} detail table(s)`, 'success');
+}
+
+async function deactivateMasterRow(idx) {
+  const entry = state.stack[idx];
+  entry.masterRow = null;
+  entry.masterRowIndex = null;
+  truncateStackAfter(idx);
+  await reloadBrowserRows(idx);
+}
+
+/* ---------- Content Render ---------- */
+function renderContent() {
+  if (!state.currentTable) {
+    return `<div class="content"><div class="empty large">
+      <div class="emoji">🗄️</div>
+      Select a table above to begin browsing.
+    </div></div>`;
+  }
+  if (!state.stack.length) {
+    return `<div class="content"><div class="empty large">
+      <div class="emoji">⏳</div>
+      Loading...
+    </div></div>`;
+  }
+  let html = `<div class="content">`;
+  state.stack.forEach((entry, idx) => {
+    html += renderBrowserCard(entry, idx);
+  });
+  html += `</div>`;
+  return html;
+}
+
+function renderBrowserCard(entry, idx) {
+  const isRoot = entry.depth === 0;
+  const lockedCols = entry.filters.map(f => f.column);
+  const isAlternate = entry.alternateIdx > 0;
+  const depthClass = isAlternate ? 'depth-alt' : `depth-${Math.min(entry.depth, 3) || 1}`;
+
+  let html = `<div class="browser-card ${depthClass}" data-idx="${idx}">`;
+  html += renderBrowserHeader(entry, idx);
+  if (entry.error) html += `<div class="banner error">${esc(entry.error)}</div>`;
+  if (!entry.hasPk) html += `<div class="banner error">⚠️ This table has no PRIMARY KEY — create/edit/delete/master actions are disabled.</div>`;
+  if (entry.clamped) html += `<div class="banner warn">⚠️ Row limit of 1000 reached — results were clamped. Use search or master-detail to narrow.</div>`;
+
+  // Search form panel
+  if (entry.searching && entry.searching.active) {
+    html += renderSearchPanel(entry, idx);
+  }
+  // CRUD form panel
+  if (entry.editing) {
+    html += renderCrudPanel(entry, idx);
+  }
+  // Master-detail lock chips for the rows filter (detail tables)
+  if (entry.filters && entry.filters.length) {
+    html += `<div style="padding:8px 14px 0 14px;"><div class="lock-chips">${
+      entry.filters.map(f => `<span class="lock-chip">${esc(f.column)} = ${esc(formatVal(f.value))}</span>`).join('')
+    }</div></div>`;
+  }
+  // Rows table
+  html += renderRowsTable(entry, idx);
+  html += renderPagination(entry, idx);
+  html += `</div>`;
+  return html;
+}
+
+function renderBrowserHeader(entry, idx) {
+  const isRoot = entry.depth === 0;
+  const altBadge = entry.alternateIdx ? `<span class="alt-badge">Alternate Detail #${entry.alternateIdx} / ${entry.totalAlternates}: ${esc(entry.table)}</span>` : '';
+  const masterActive = !!entry.masterRow;
+  return `
+  <div class="browser-header">
+    <div class="browser-title">
+      ${masterActive ? '📌 ' : ''}
+      ${esc(entry.table)}
+      <span class="schema-tag">(schema: ${esc(entry.schema)})</span>
+      ${altBadge}
+    </div>
+    ${masterActive ? `<span class="lock-chip">Master row active</span>` : ''}
+    <div class="browser-actions">
+      <button class="icon-btn success tooltip" data-act="search" data-idx="${idx}" data-tip="${entry.searching && entry.searching.active ? 'Cancel search' : 'Search table (LIKE patterns)'}">
+        ${entry.searching && entry.searching.active ? '✖' : '🔍'}
+      </button>
+      <button class="icon-btn primary tooltip" data-act="create" data-idx="${idx}" data-tip="Insert new row" ${(!state.txnActive || !entry.hasPk) ? 'disabled':''}>＋</button>
+      ${!isRoot ? `
+        <button class="icon-btn warn tooltip" data-act="pop" data-idx="${idx}" data-tip="Close this detail browser / pop state">⬆</button>
+      ` : ``}
+      ${isRoot && !masterActive ? `` : ``}
+      ${masterActive ? `
+        <button class="icon-btn warn tooltip" data-act="unmaster" data-idx="${idx}" data-tip="Release master row, close detail browsers">✖</button>
+      ` : ``}
+    </div>
+  </div>`;
+}
+
+function renderRowsTable(entry, idx) {
+  if (!entry.rows) return `<div class="empty">Loading rows…</div>`;
+  if (!entry.rows.length && !entry.filters.length && !entry.searching) {
+    return `<div class="empty">Table is empty. Click ＋ to insert a row.</div>`;
+  }
+  if (!entry.rows.length) {
+    return `<div class="empty">No rows match current filters.</div>`;
+  }
+  const isMasterRow = (rI) => entry.masterRowIndex === rI;
+  const pkSet = new Set(entry.pkColumns);
+
+  let html = `<div class="table-wrap"><table class="data"><thead><tr>`;
+  html += `<th class="col-actions-header pk-col" style="width:120px;">
+    <button class="icon-btn danger tooltip" data-act="cancel-browser" data-idx="${idx}" data-tip="Cancel / close this browser" style="width:22px;height:22px;">✖</button>
+    Actions
+  </th>`;
+  for (const col of entry.columns) {
+    const isPk = pkSet.has(col.column_name);
+    const tipParts = [];
+    tipParts.push(col.data_type + (col.udt_name && col.udt_name !== col.data_type ? ` (${col.udt_name})` : ''));
+    if (col.character_maximum_length) tipParts.push(`len:${col.character_maximum_length}`);
+    if (col.numeric_precision != null) tipParts.push(`prec:${col.numeric_precision}${col.numeric_scale?','+col.numeric_scale:''}`);
+    tipParts.push(col.is_nullable === 'YES' ? 'nullable' : 'NOT NULL');
+    if (col.column_default) tipParts.push(`default: ${col.column_default}`);
+    if (col.column_comment) tipParts.push(col.column_comment);
+    if (col.foreign_keys && col.foreign_keys.length) {
+      for (const fk of col.foreign_keys) tipParts.push(`→ FK: ${fk.foreign_table_name}.${fk.foreign_column_name}`);
+    }
+    const tip = tipParts.join('\n');
+    html += `<th class="${isPk?'pk-col':''} tooltip" data-tip="${esc(tip)}">
+      ${esc(col.column_name)}${isPk?' 🔑':''}
+      <div class="dtype">${esc(col.data_type)}${col.is_nullable==='YES'?'?':''}</div>
+    </th>`;
+  }
+  html += `</tr></thead><tbody>`;
+
+  for (let rI = 0; rI < entry.rows.length; rI++) {
+    const row = entry.rows[rI];
+    const isLocked = isMasterRow(rI);
+    html += `<tr class="${isLocked?'master-row':''}">`;
+    // Actions cell
+    html += `<td class="actions">
+      <button class="icon-btn primary tooltip" data-act="edit" data-idx="${idx}" data-row="${rI}" data-tip="Edit row" ${(!state.txnActive || !entry.hasPk || isLocked)?'disabled':''}>✎</button>
+      <button class="icon-btn danger tooltip" data-act="delete" data-idx="${idx}" data-row="${rI}" data-tip="Delete row" ${(!state.txnActive || !entry.hasPk || isLocked)?'disabled':''}>🗑</button>
+      <button class="icon-btn success tooltip" data-act="master" data-idx="${idx}" data-row="${rI}" data-tip="${isLocked?'Release master (has children)':'Use as master row — open detail tables below'}" ${(!entry.hasPk || (!isLocked && entry.editing))?'disabled':''} ${isLocked?'style="background:#fff3cd;border-color:#ffc107;"':''}>${isLocked?'📌':'➡'}</button>
+    </td>`;
+    for (const col of entry.columns) {
+      const v = row[col.column_name];
+      const isPk = pkSet.has(col.column_name);
+      html += `<td class="${isPk?'pk-col':''}">${v==null ? '<span class="null-val">NULL</span>' : esc(formatVal(v))}</td>`;
+    }
+    html += `</tr>`;
+  }
+
+  html += `</tbody></table></div>`;
+  return html;
+}
+
+function renderPagination(entry, idx) {
+  const totalPages = Math.max(1, Math.ceil((entry.total||0) / entry.pageSize));
+  const cur = entry.page + 1;
+  return `<div class="pagination">
+    <div class="info">Rows ${entry.page*entry.pageSize+1}–${Math.min(entry.page*entry.pageSize+entry.rows.length, entry.total||0)} of ${entry.total||0}${entry.clamped?' (clamped to 1000 max)':''}</div>
+    <div class="spacer"></div>
+    <button class="icon-btn" data-act="prev" data-idx="${idx}" ${entry.page===0?'disabled':''}>‹</button>
+    <span>Page ${cur} / ${totalPages}</span>
+    <button class="icon-btn" data-act="next" data-idx="${idx}" ${entry.page+1 >= totalPages?'disabled':''}>›</button>
+    <span style="margin-left:10px;">
+      <select data-act="pagesize" data-idx="${idx}" style="font-size:11px;padding:2px;">
+        ${[25,50,100,250,500].map(n => `<option value="${n}" ${n===entry.pageSize?'selected':''}>${n}/page</option>`).join('')}
+      </select>
+    </span>
+  </div>`;
+}
+
+function formatVal(v) {
+  if (v == null) return '';
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+/* ---------- CRUD Panel ---------- */
+function renderCrudPanel(entry, idx) {
+  const mode = entry.editing.mode;
+  const data = entry.editing.data;
+  const lockedCols = new Set(entry.filters.map(f=>f.column));
+  const pkSet = new Set(entry.pkColumns);
+  // On create, auto-fill locked columns from master filters
+  if (mode === 'create') {
+    for (const f of entry.filters) if (data[f.column] == null) data[f.column] = f.value;
+  }
+  const title = mode==='create' ? '➕ Insert new row' : mode==='edit' ? '✎ Edit row' : '';
+  return `<div class="form-panel" data-form="crud" data-idx="${idx}">
+    <h3>${title} <span style="font-weight:400;color:#999;font-size:11px;">— ${esc(entry.table)}</span></h3>
+    <div class="form-grid">
+      ${entry.columns.map(col => renderFormField(col, data, lockedCols, pkSet, mode)).join('')}
+    </div>
+    <div class="form-buttons">
+      <button class="btn btn-cancel" data-form-act="cancel">Cancel / Back (Esc)</button>
+      <button class="btn btn-accept" data-form-act="submit">${mode==='create'?'Insert (Enter)':'Save (Enter)'}</button>
+    </div>
+  </div>`;
+}
+
+function renderFormField(col, data, lockedCols, pkSet, mode) {
+  const v = data[col.column_name];
+  const isLocked = lockedCols.has(col.column_name);
+  const isPk = pkSet.has(col.column_name);
+  // Edit mode: PK columns disabled so they can't be changed (we update by PK)
+  const isPkDisabled = (mode === 'edit' && isPk);
+  const disabled = isLocked || isPkDisabled;
+  const type = guessInputType(col);
+  let input;
+  if (type === 'textarea') {
+    input = `<textarea rows="2" data-col="${esc(col.column_name)}" ${disabled?'disabled':''}>${esc(formatVal(v))}</textarea>`;
+  } else if (type === 'checkbox') {
+    input = `<input type="checkbox" data-col="${esc(col.column_name)}" ${v?'checked':''} ${disabled?'disabled':''}>`;
+  } else if (type === 'date') {
+    input = `<input type="date" data-col="${esc(col.column_name)}" value="${esc(formatVal(v)).slice(0,10)}" ${disabled?'disabled':''}>`;
+  } else {
+    input = `<input type="${type}" data-col="${esc(col.column_name)}" value="${esc(formatVal(v))}" ${disabled?'disabled':''} ${col.is_nullable!=='YES'?'required':''}>`;
+  }
+  const hintParts = [];
+  if (col.column_comment) hintParts.push(col.column_comment);
+  if (col.column_default && mode==='create') hintParts.push(`default: ${col.column_default}`);
+  if (col.character_maximum_length) hintParts.push(`max ${col.character_maximum_length} chars`);
+  return `<div class="form-field">
+    <label class="${isPk?'pk':''} ${isLocked?'locked':''}">
+      ${esc(col.column_name)}${isPk?' 🔑':''}
+    </label>
+    ${input}
+    ${hintParts.length ? `<div class="hint">${esc(hintParts.join(' • '))}</div>` : ''}
+  </div>`;
+}
+
+function guessInputType(col) {
+  const t = col.data_type;
+  const u = col.udt_name;
+  if (t === 'boolean') return 'checkbox';
+  if (/date/.test(t)) return 'date';
+  if (t === 'timestamp without time zone' || t === 'timestamp with time zone') return 'datetime-local';
+  if (/int|numeric|decimal|float|double|serial/.test(t)) return 'number';
+  if (col.character_maximum_length && col.character_maximum_length > 200) return 'textarea';
+  if (u === 'text' || (col.character_maximum_length && col.character_maximum_length > 120)) return 'textarea';
+  return 'text';
+}
+
+function collectForm(formEl, columns) {
+  const out = {};
+  $$('[data-col]', formEl).forEach(el => {
+    const col = el.dataset.col;
+    const meta = columns.find(c => c.column_name === col);
+    if (el.type === 'checkbox') { out[col] = el.checked; return; }
+    const raw = el.value;
+    if (raw === '' && meta && meta.is_nullable === 'YES') { out[col] = null; return; }
+    if (raw === '' && meta && meta.is_nullable !== 'YES' && meta.column_default) { out[col] = undefined; return; }
+    if (meta) {
+      const t = meta.data_type;
+      if (/int/.test(t)) out[col] = raw === '' ? null : (raw.includes('.') ? Number(raw) : parseInt(raw, 10));
+      else if (/numeric|decimal|float|double/.test(t)) out[col] = raw === '' ? null : parseFloat(raw);
+      else if (t === 'boolean') out[col] = raw === 'true' || raw === 't' || raw === '1';
+      else out[col] = raw;
+    } else out[col] = raw;
+  });
+  return out;
+}
+
+/* ---------- Search Panel ---------- */
+function renderSearchPanel(entry, idx) {
+  const lockedCols = new Set(entry.filters.map(f=>f.column));
+  return `<div class="form-panel" data-form="search" data-idx="${idx}">
+    <h3>🔍 Search <span style="font-weight:400;color:#999;font-size:11px;">— use '%' or '_' LIKE wildcards; blank = any match. Locked columns are not searchable.</span></h3>
+    <div class="form-grid">
+      ${entry.columns.map(col => {
+        if (lockedCols.has(col.column_name)) return '';
+        const cur = (entry.searching.criteria.find(c=>c.column===col.column_name) || {}).value || '';
+        return `<div class="form-field">
+          <label>${esc(col.column_name)} ILIKE</label>
+          <input type="text" data-col="${esc(col.column_name)}" value="${esc(cur)}" placeholder="%keyword%">
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="form-buttons left">
+      <button class="btn btn-cancel" data-search-act="cancel">Cancel / Back (Esc)</button>
+      <button class="btn btn-accept" data-search-act="submit">Submit search (Enter)</button>
+    </div>
+  </div>`;
+}
+
+/* ---------- Content handlers ---------- */
+function attachContentHandlers() {
+  // Handle form Esc/Enter first
+  $$('[data-form="crud"]').forEach(form => {
+    const idx = +form.dataset.idx;
+    $$('[data-col]', form).forEach(inp => {
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); cancelEditing(idx); }
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || inp.tagName!=='TEXTAREA')) { e.preventDefault(); submitCrud(idx); }
+      });
+    });
+    form.querySelector('[data-form-act="cancel"]').onclick = () => cancelEditing(idx);
+    form.querySelector('[data-form-act="submit"]').onclick = () => submitCrud(idx);
+  });
+
+  $$('[data-form="search"]').forEach(form => {
+    const idx = +form.dataset.idx;
+    $$('[data-col]', form).forEach(inp => {
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); cancelSearch(idx); }
+        if (e.key === 'Enter') { e.preventDefault(); submitSearch(idx); }
+      });
+    });
+    form.querySelector('[data-search-act="cancel"]').onclick = () => cancelSearch(idx);
+    form.querySelector('[data-search-act="submit"]').onclick = () => submitSearch(idx);
+  });
+
+  // Browser-level actions
+  $$('.browser-card').forEach(card => {
+    const idx = +card.dataset.idx;
+    $$('[data-act]', card).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const act = btn.dataset.act;
+        const rowIdx = btn.dataset.row != null ? +btn.dataset.row : null;
+        await handleAction(idx, act, rowIdx, btn);
+      });
+    });
+  });
+}
+
+async function handleAction(idx, act, rowIdx, btn) {
+  const entry = state.stack[idx];
+  try {
+    if (act === 'search') { toggleSearch(idx); return; }
+    if (act === 'create') {
+      entry.editing = { mode: 'create', data: {} };
+      entry.searching && (entry.searching.active = false);
+      render(); return;
+    }
+    if (act === 'pop') {
+      // Remove this browser and everything after; if this was activated as master-detail, go back to parent
+      // Actually: "pop" = close detail, re-enable parent's master row as selectable. Simplest: close from stack at idx
+      // parent is idx-1
+      state.stack = state.stack.slice(0, idx);
+      // If parent (now last) has a masterRow that was used to generate this, we may need to see if other alternates remain
+      render(); return;
+    }
+    if (act === 'unmaster') { await deactivateMasterRow(idx); render(); return; }
+    if (act === 'cancel-browser') {
+      // Root: confirm and clear. Non-root: pop
+      if (idx === 0) {
+        const ok = await showConfirm('Close browser?', 'Return to empty state (no table selected).');
+        if (ok) {
+          state.currentTable = null;
+          localStorage.removeItem('hotx_table');
+          state.stack = [];
+        }
+      } else {
+        state.stack = state.stack.slice(0, idx);
+      }
+      render(); return;
+    }
+    if (act === 'edit') {
+      entry.editing = { mode: 'edit', data: JSON.parse(JSON.stringify(entry.rows[rowIdx])), rowIndex: rowIdx };
+      render(); return;
+    }
+    if (act === 'delete') {
+      const row = entry.rows[rowIdx];
+      const pkPreview = entry.pkColumns.map(c => `${c}=${formatVal(row[c])}`).join(', ');
+      const ok = await showConfirm('Delete row?', `About to DELETE from ${entry.table}:\n  ${pkPreview}\n\nThis cannot be undone (unless you rollback an open transaction).`, {confirmText:'Delete', danger:true});
+      if (!ok) return;
+      await api('/api/row', { method: 'DELETE', body: {
+        schema: entry.schema, table: entry.table,
+        pk: Object.fromEntries(entry.pkColumns.map(c => [c, row[c]])),
+        pkColumns: entry.pkColumns
+      }});
+      toast('Row deleted', 'success');
+      // Reload from idx downward (to also clear children if master row was deleted)
+      for (let i = idx; i < state.stack.length; i++) await reloadBrowserRows(i);
+      render(); return;
+    }
+    if (act === 'master') {
+      if (entry.masterRowIndex === rowIdx) {
+        await deactivateMasterRow(idx);
+      } else {
+        await activateMasterRow(idx, rowIdx);
+      }
+      render(); return;
+    }
+    if (act === 'prev') { entry.page = Math.max(0, entry.page - 1); await reloadBrowserRows(idx); render(); return; }
+    if (act === 'next') { entry.page++; await reloadBrowserRows(idx); render(); return; }
+    if (act === 'pagesize') { entry.pageSize = +btn.value; entry.page = 0; await reloadBrowserRows(idx); render(); return; }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+/* ---------- Search ---------- */
+function toggleSearch(idx) {
+  const entry = state.stack[idx];
+  if (entry.searching && entry.searching.active) {
+    cancelSearch(idx); return;
+  }
+  entry.searching = { active: true, criteria: (entry.searching && entry.searching.criteria) || [] };
+  entry.editing = null;
+  render();
+}
+function cancelSearch(idx) {
+  const entry = state.stack[idx];
+  entry.searching = { active: false, criteria: [] };
+  reloadBrowserRows(idx).then(render);
+}
+async function submitSearch(idx) {
+  const entry = state.stack[idx];
+  const panel = document.querySelector(`[data-form="search"][data-idx="${idx}"]`);
+  const lockedCols = new Set(entry.filters.map(f=>f.column));
+  const criteria = [];
+  $$('[data-col]', panel).forEach(el => {
+    if (lockedCols.has(el.dataset.col)) return;
+    const val = el.value.trim();
+    if (!val.length) return;
+    criteria.push({ column: el.dataset.col, op: 'ilike', value: val });
+  });
+  entry.searching = { active: true, criteria };
+  entry.page = 0;
+  await reloadBrowserRows(idx);
+  render();
+  toast(`Search applied — ${entry.rows.length} match(es)`, 'success');
+}
+
+/* ---------- CRUD ---------- */
+function cancelEditing(idx) {
+  state.stack[idx].editing = null;
+  render();
+}
+async function submitCrud(idx) {
+  const entry = state.stack[idx];
+  const panel = document.querySelector(`[data-form="crud"][data-idx="${idx}"]`);
+  const data = collectForm(panel, entry.columns);
+  try {
+    if (entry.editing.mode === 'create') {
+      await api('/api/row', { body: { schema: entry.schema, table: entry.table, row: data } });
+      toast('Row inserted', 'success');
+    } else {
+      const orig = entry.editing.data;
+      await api('/api/row', { method: 'PUT', body: {
+        schema: entry.schema, table: entry.table,
+        row: data,
+        pk: Object.fromEntries(entry.pkColumns.map(c => [c, orig[c]])),
+        pkColumns: entry.pkColumns
+      }});
+      toast('Row updated', 'success');
+    }
+    entry.editing = null;
+    // Reload from idx downward
+    for (let i = idx; i < state.stack.length; i++) {
+      state.stack[i].page = 0;
+      await reloadBrowserRows(i);
+    }
+    render();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+/* ---------- Global keyboard ---------- */
+document.addEventListener('keydown', (e) => {
+  // Escape: if any form open, cancel it. If any non-root browser is top-most, pop.
+  if (e.key === 'Escape' && !e.target.closest('.login-card') && !e.target.closest('.modal-backdrop')) {
+    for (let i = state.stack.length - 1; i >= 0; i--) {
+      const entry = state.stack[i];
+      if (entry.editing) { cancelEditing(i); e.preventDefault(); return; }
+      if (entry.searching && entry.searching.active) { cancelSearch(i); e.preventDefault(); return; }
+      if (i > 0) { state.stack = state.stack.slice(0, i); e.preventDefault(); render(); return; }
+    }
+  }
+});
+
+/* ---------- Boot ---------- */
+(async function boot(){
+  try {
+    const v = await api('/api/version');
+    state.version = v.version;
+  } catch(_){}
+  if (state.sessionId) {
+    try {
+      const creds = await api('/api/creds');
+      state.creds = creds;
+      await refreshSchemas();
+      await refreshTxnStatus();
+      if (state.currentTable && state.tables.find(t => t.table_name === state.currentTable)) {
+        try { await initRootBrowser(); } catch(e){ toast(e.message, 'error'); }
+      }
+    } catch(e) {
+      // session dead
+      state.sessionId = null;
+      state.creds = null;
+      localStorage.removeItem('hotx_sid');
+    }
+  }
+  render();
+})();
+</script>
+</body>
+</html>
