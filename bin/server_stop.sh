@@ -17,7 +17,7 @@ for a in "$@"; do
     -h|--help)
       echo "Usage: $0 [--force|-9] [--all]"
       echo "  --force     skip 8s graceful wait, SIGKILL immediately"
-      echo "  --all       also kill any child 'node interpreter.js' workers"
+      echo "  --all       also kill any stray HotX-related node processes"
       exit 0
       ;;
     *) echo "Unknown flag: $a (try --help)"; exit 2 ;;
@@ -55,7 +55,7 @@ if [[ -n "${pid}" ]]; then
       kill -9 "$pid" 2>/dev/null || true
       killed_any=1
     else
-      echo "[GRACEFUL] Sending SIGTERM to HotX server pid=$pid — allowing it to drain PG pools, flush users.json writes, close Express keep-alives."
+      echo "[GRACEFUL] Sending SIGTERM to HotX server pid=$pid — allowing it to drain PG pools, release session clients, close Express keep-alives."
       kill -TERM "$pid" 2>/dev/null || true
       killed_any=1
       # Wait up to 8 seconds, checking every 500ms
@@ -93,27 +93,6 @@ if [[ $FORCE == 1 || $ALL == 1 || -z "${pid}" ]]; then
     fi
   else
     echo "[OK] no stray node server.js processes."
-  fi
-fi
-
-# --- 3b. --all also kills any matching node interpreter.js workers ---
-if [[ $ALL == 1 ]]; then
-  echo
-  echo "[SCAN --all] Checking for node interpreter.js workers..."
-  workers="$(pgrep -af 'node.*interpreter.js' | grep -v 'pgrep' || true)"
-  if [[ -n "${workers}" ]]; then
-    echo "--- found worker processes ---"
-    echo "$workers"
-    pkill -TERM -f 'node.*interpreter.js' 2>/dev/null || true
-    sleep 1
-    still2="$(pgrep -af 'node.*interpreter.js' | grep -v 'pgrep' || true)"
-    if [[ -n "${still2}" ]]; then
-      echo "[WARN] workers still alive — SIGKILL:"
-      echo "$still2"
-      pkill -9 -f 'node.*interpreter.js' 2>/dev/null || true
-    fi
-  else
-    echo "[OK] no node interpreter.js workers."
   fi
 fi
 

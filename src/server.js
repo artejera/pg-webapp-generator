@@ -85,7 +85,10 @@ function ok(res, data) {
 
 function err(res, e, status = 400) {
   const msg = e && e.message ? e.message : String(e);
-  return res.status(status).json({ ok: false, error: msg, detail: e && e.detail ? e.detail : undefined });
+  const detail = (e && (e.detail || e.where || e.hint || e.position))
+    ? `${e.detail ? 'DETAIL: '+e.detail+'. ' : ''}${e.where ? 'WHERE: '+e.where+'. ' : ''}${e.hint ? 'HINT: '+e.hint+'. ' : ''}${e.position ? 'POS: '+e.position+'. ' : ''}`.trim()
+    : undefined;
+  return res.status(status).json({ ok: false, error: msg, detail });
 }
 
 app.get('/api/version', (_req, res) => {
@@ -248,38 +251,53 @@ app.get('/api/columns', async (req, res) => {
 app.get('/api/foreign-keys', async (req, res) => {
   try {
     const schema = req.query.schema || 'public';
+    // Use pg_catalog directly (100% stable across PG versions). Avoids
+    // information_schema quirks:
+    //   - ccu has NO ordinal_position
+    //   - tc.unique_constraint_name can be missing on older PG builds
+    // conkey = array of child (FK) table attribute numbers
+    // confkey = array of parent (PK/UQ) table attribute numbers
+    // Arrays are ordinal-corresponding: conkey[i] references confkey[i].
+    // Unnest both WITH ORDINALITY + join on ordinal → guarantees order.
     const sql = `
-      SELECT DISTINCT
-        tc.table_schema AS child_schema,
-        tc.table_name AS child_table,
-        ccu.table_schema AS parent_schema,
-        ccu.table_name AS parent_table,
-        tc.constraint_name,
-        (SELECT array_agg(kcu.column_name ORDER BY kcu.ordinal_position)
-         FROM information_schema.key_column_usage kcu
-         WHERE kcu.constraint_name = tc.constraint_name
-           AND kcu.table_schema = tc.table_schema
-           AND kcu.table_name = tc.table_name) AS child_columns,
-        (SELECT array_agg(ccu2.column_name ORDER BY kcu2.ordinal_position)
-         FROM information_schema.key_column_usage kcu2
-         JOIN information_schema.constraint_column_usage ccu2
-           ON kcu2.constraint_name = ccu2.constraint_name
-         WHERE kcu2.constraint_name = tc.constraint_name
-           AND kcu2.table_schema = tc.table_schema) AS parent_columns
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-       AND tc.table_name = kcu.table_name
-      JOIN information_schema.constraint_column_usage ccu
-        ON tc.constraint_name = ccu.constraint_name
-       AND tc.table_schema = ccu.table_schema
-      WHERE tc.constraint_type = 'FOREIGN KEY'
-        AND tc.table_schema = $1
-      ORDER BY tc.table_name, tc.constraint_name
+      SELECT
+        nc.nspname::text AS child_schema,
+        c.relname::text  AS child_table,
+        np.nspname::text AS parent_schema,
+        p.relname::text  AS parent_table,
+        con.conname::text AS constraint_name,
+        string_agg(ka.attname::text, ',' ORDER BY fk.ord) AS child_columns,
+        string_agg(pa.attname::text, ',' ORDER BY fk.ord) AS parent_columns
+      FROM pg_catalog.pg_constraint con
+      JOIN pg_catalog.pg_class c        ON c.oid     = con.conrelid
+      JOIN pg_catalog.pg_namespace nc   ON nc.oid    = c.relnamespace
+      JOIN pg_catalog.pg_class p        ON p.oid     = con.confrelid
+      JOIN pg_catalog.pg_namespace np   ON np.oid    = p.relnamespace
+      JOIN LATERAL unnest(con.conkey)   WITH ORDINALITY AS fk(child_attnum, ord) ON true
+      JOIN LATERAL unnest(con.confkey)  WITH ORDINALITY AS pk(parent_attnum, ord) ON pk.ord = fk.ord
+      JOIN pg_catalog.pg_attribute ka   ON ka.attrelid = con.conrelid   AND ka.attnum = fk.child_attnum
+      JOIN pg_catalog.pg_attribute pa   ON pa.attrelid = con.confrelid  AND pa.attnum = pk.parent_attnum
+      WHERE con.contype = 'f'
+        AND nc.nspname = $1
+        AND ka.attisdropped = false
+        AND pa.attisdropped = false
+      GROUP BY nc.nspname, c.relname, np.nspname, p.relname, con.conname
+      ORDER BY c.relname, con.conname
     `;
     const r = await runQuery(req.sessionId, sql, [schema], { enforceLimit: false });
-    ok(res, r.rows);
+    const rows = r.rows.map(row => {
+      const splitCsv = s => {
+        if (Array.isArray(s)) return s;
+        if (typeof s !== 'string' || !s) return [];
+        return s.replace(/^\{|\}$/g, '').split(',').filter(x => x.length);
+      };
+      return {
+        ...row,
+        child_columns: splitCsv(row.child_columns),
+        parent_columns: splitCsv(row.parent_columns)
+      };
+    });
+    ok(res, rows);
   } catch (e) { err(res, e); }
 });
 

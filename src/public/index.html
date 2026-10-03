@@ -186,7 +186,15 @@ async function api(path, opts={}) {
   const qs = opts.query ? ('?'+new URLSearchParams({ sessionId: state.sessionId, ...opts.query }).toString()) : '';
   const res = await fetch(url+qs, { method, headers, body });
   const json = await res.json().catch(()=>({ok:false,error:'Non-JSON response'}));
-  if (!json.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  if (!json.ok) {
+    const msg = json.error || `HTTP ${res.status}`;
+    const detail = json.detail ? `\n\n${json.detail}` : '';
+    const combined = msg + detail;
+    const err = new Error(combined);
+    err.plainError = json.error;
+    err.detail = json.detail || null;
+    throw err;
+  }
   return json.data;
 }
 
@@ -288,8 +296,26 @@ function attachLoginHandlers() {
       state.version = v.version;
       await refreshSchemas();
       await refreshTxnStatus();
-      toast('Connected', 'success');
+      // H1 defense: restore saved currentTable if it matches an available table
+      // and actually initRootBrowser on it so boot-to-table works first-try
+      state.currentTable = localStorage.getItem('hotx_table') || null;
+      if (state.currentTable && state.currentSchema) {
+        const savedSchema = localStorage.getItem('hotx_schema');
+        if (savedSchema && !state.schemas.includes(savedSchema)) state.currentSchema = state.schemas[0] || savedSchema;
+        const match = state.tables.find(t=>t.table_name===state.currentTable);
+        if (match) {
+          try { await initRootBrowser(); } catch(e) {
+            state.currentTable = null;
+            localStorage.removeItem('hotx_table');
+            toast(e.message, 'error');
+          }
+        } else {
+          state.currentTable = null;
+          localStorage.removeItem('hotx_table');
+        }
+      }
       render();
+      toast('Connected', 'success');
     } catch (e) {
       if (errEl) errEl.textContent = e.message;
     } finally {
@@ -316,11 +342,17 @@ function renderHeader() {
     <div class="chip" title="Credentials">${esc(c.user||'?')}@${esc(c.host||'?')}:${c.port||'?'}/${esc(c.database||'?')}</div>
     <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
       Schema
-      <select id="hdr-schema">${state.schemas.length?schemasOpts:'<option value="">(none)</option>'}</select>
+      <select id="hdr-schema">
+        <option value="">(select schema)</option>
+        ${schemasOpts}
+      </select>
     </label>
     <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
       Table
-      <select id="hdr-table">${state.tables.length?tablesOpts:'<option value="">(no tables)</option>'}</select>
+      <select id="hdr-table">
+        <option value="">(select a table)</option>
+        ${tablesOpts}
+      </select>
     </label>
     <div class="txn-controls" id="txn-ctrls">
       ${state.txnActive
@@ -335,7 +367,14 @@ function renderHeader() {
 }
 
 function attachHeaderHandlers() {
-  $('#hdr-schema').onchange = async (e) => {
+  // Defensive: force DOM .value to match state (fixes H1: stale UI/state mismatch where
+  // the rendered HTML opts pre-select something that doesn't match restored state but the
+  // user can't "re-select" the same item to trigger the onchange)
+  const sEl = $('#hdr-schema');
+  const tEl = $('#hdr-table');
+  if (sEl && state.currentSchema) sEl.value = state.currentSchema;
+  if (tEl && state.currentTable) tEl.value = state.currentTable;
+  sEl.onchange = async (e) => {
     state.currentSchema = e.target.value;
     state.currentTable = null;
     state.stack = [];
@@ -352,33 +391,43 @@ function attachHeaderHandlers() {
     if (state.currentTable) {
       try {
         await initRootBrowser();
-      } catch(e) { toast(e.message, 'error'); }
+      } catch(e) {
+        state.currentTable = null;
+        localStorage.removeItem('hotx_table');
+        render();
+        toast(e.message, 'error');
+        return;
+      }
     }
     render();
   };
   $('#hdr-logout').onclick = doLogout;
   $$('#txn-ctrls [data-txn]').forEach(b => b.onclick = async () => {
     const act = b.dataset.txn;
+    let deferredToast = null;
     try {
-      if (act === 'begin') { await api('/api/txn/begin'); toast('Transaction started', 'success'); }
+      if (act === 'begin') { await api('/api/txn/begin', { method: 'POST', body: {} }); deferredToast = ['Transaction started', 'success']; }
       if (act === 'commit') {
         try {
-          await api('/api/txn/commit');
-          toast('Committed', 'success');
+          await api('/api/txn/commit', { method: 'POST', body: {} });
+          deferredToast = ['Committed', 'success'];
         } catch(e) {
+          render();
           showConfirm('Commit failed', e.message, {confirmText:'OK', cancelText:null, danger:true});
+          return;
         }
       }
       if (act === 'rollback') {
         const ok = await showConfirm('Rollback?', 'All uncommitted changes will be discarded.', {confirmText:'Rollback', danger:true});
         if (!ok) return;
-        await api('/api/txn/rollback');
-        toast('Rolled back', 'warn');
+        await api('/api/txn/rollback', { method: 'POST', body: {} });
+        deferredToast = ['Rolled back', 'warn'];
       }
       await refreshTxnStatus();
       if (state.currentTable) { try { await initRootBrowser(); } catch(_){} }
       render();
-    } catch(e) { toast(e.message, 'error'); render(); }
+      if (deferredToast) toast(deferredToast[0], deferredToast[1]);
+    } catch(e) { render(); toast(e.message, 'error'); }
   });
 }
 
@@ -578,9 +627,27 @@ function renderContent() {
     </div></div>`;
   }
   if (!state.stack.length) {
+    // Defense-in-depth: if currentTable is set but stack is empty, this is a bug.
+    // Kick off initRootBrowser asynchronously so user always sees table eventually.
+    setTimeout(async () => {
+      if (!state.stack.length && state.currentTable && !state._stackInitInProgress) {
+        state._stackInitInProgress = true;
+        try {
+          await initRootBrowser();
+          render();
+        } catch(e) {
+          state.currentTable = null;
+          localStorage.removeItem('hotx_table');
+          render();
+          toast(e.message, 'error');
+        } finally {
+          state._stackInitInProgress = false;
+        }
+      }
+    }, 0);
     return `<div class="content"><div class="empty large">
       <div class="emoji">⏳</div>
-      Loading...
+      Loading ${esc(state.currentTable)}...
     </div></div>`;
   }
   let html = `<div class="content">`;
@@ -1036,18 +1103,20 @@ document.addEventListener('keydown', (e) => {
   try {
     const v = await api('/api/version');
     state.version = v.version;
-  } catch(_){}
+  } catch(e){
+  }
   if (state.sessionId) {
     try {
       const creds = await api('/api/creds');
       state.creds = creds;
       await refreshSchemas();
       await refreshTxnStatus();
-      if (state.currentTable && state.tables.find(t => t.table_name === state.currentTable)) {
-        try { await initRootBrowser(); } catch(e){ toast(e.message, 'error'); }
+      if (state.currentTable && inTables) {
+        try { await initRootBrowser(); } catch(e){
+          toast(e.message, 'error');
+        }
       }
     } catch(e) {
-      // session dead
       state.sessionId = null;
       state.creds = null;
       localStorage.removeItem('hotx_sid');

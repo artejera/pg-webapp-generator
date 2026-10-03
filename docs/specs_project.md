@@ -106,3 +106,6 @@ Navigation buttons, shown in predictable locations:
 - sql-expression 
 
 <hr/><hr/><hr/><br/>
+# NEXT
+- Show HotX version in connection dialog
+- Think on the posibility of setting 'TXN' state automatically if a 'create/modify/delete' button is ever pressed.
