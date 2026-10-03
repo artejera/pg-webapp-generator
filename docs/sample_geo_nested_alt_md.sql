@@ -1,6 +1,6 @@
 -- =============================================================================
 -- PostgreSQL Sample: Nested + Alternate Master-Detail Fixture
--- Tables designed specifically to exercise HotY Groups B/C features:
+-- Tables designed specifically to exercise HotX Groups B/C features:
 --   NESTED CHAIN (depth 3):
 --     countries (country_id)
 --       -> federated_states (country_id, state_id)
@@ -10,7 +10,7 @@
 --       -> federated_states (country_id, state_id)    [main detail]
 --       -> sales_regions    (country_id, region_id)   [alternate detail]
 --
--- FK tail-column rule (HotY isTailFkColumn / clientTailFkColumns):
+-- FK tail-column rule (HotX isTailFkColumn / clientTailFkColumns):
 --   The LAST ordinal-position column of each composite FK becomes the
 --   clickable drill-link + Browse anchor; earlier N-1 columns form the
 --   prefix that gets lock-chipped in detail views.
@@ -18,6 +18,7 @@
 
 BEGIN;
 
+drop schema if exists geo cascade
 create schema if not exists geo;
 SET search_path TO geo, public;
 
@@ -70,7 +71,7 @@ CREATE TABLE federated_states (
         REFERENCES countries (country_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT uq_state_per_country_display UNIQUE (country_id, state_abbrev)
 );
-COMMENT ON TABLE  federated_states                 IS 'First-level sub-national subdivisions. Composite PK + FK both share country_id as the leading column -> HotY tail-col = state_id.';
+COMMENT ON TABLE  federated_states                 IS 'First-level sub-national subdivisions. Composite PK + FK both share country_id as the leading column -> HotX tail-col = state_id.';
 COMMENT ON COLUMN federated_states.country_id      IS 'FK 1/1 to countries; leading column of both PK and FK.';
 COMMENT ON COLUMN federated_states.state_id        IS 'TAIL FK COLUMN. Clickable drill-link in table browse; Browse anchor in CRUD forms.';
 
@@ -93,7 +94,7 @@ CREATE TABLE counties (
     CONSTRAINT fk_counties_states FOREIGN KEY (country_id, state_id)
         REFERENCES federated_states (country_id, state_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
-COMMENT ON TABLE  counties                      IS 'Second-level subdivisions. 3-col composite PK; FK 2-col (country_id,state_id) -> federated_states; TAIL COL = county_id. This forms a depth-3 chain in HotY: countries -> federated_states -> counties, with each intermediate row exposing a "Use as sub-header" button.';
+COMMENT ON TABLE  counties                      IS 'Second-level subdivisions. 3-col composite PK; FK 2-col (country_id,state_id) -> federated_states; TAIL COL = county_id. This forms a depth-3 chain in HotX: countries -> federated_states -> counties, with each intermediate row exposing a "Use as sub-header" button.';
 COMMENT ON COLUMN counties.country_id          IS 'From chain root; inherited as prefix lock when row inside federated_states detail card.';
 COMMENT ON COLUMN counties.state_id            IS 'Second-level FK prefix; locked when a state row is selected as sub-header.';
 COMMENT ON COLUMN counties.county_id           IS 'TAIL FK COLUMN. Clickable drill + Browse anchor in CRUD.';
@@ -102,7 +103,7 @@ COMMENT ON COLUMN counties.county_id           IS 'TAIL FK COLUMN. Clickable dri
 -- ALTERNATE DETAIL sibling table.
 -- Shares the SAME master (countries.country_id) as federated_states but is
 -- an entirely separate business-meaning dimension (sales ops vs. geography).
--- HotY detects this via buildMasterDetailChains DFS and tags it isAlternate
+-- HotX detects this via buildMasterDetailChains DFS and tags it isAlternate
 -- with a purple "Alternate Detail #N / total: sales_regions" badge.
 -- ---------------------------------------------------------------------------
 CREATE TABLE sales_regions (
@@ -121,7 +122,7 @@ CREATE TABLE sales_regions (
         REFERENCES countries (country_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT uq_region_code_per_country UNIQUE (country_id, region_code)
 );
-COMMENT ON TABLE  sales_regions              IS 'Alternate (non-geographic) detail of countries. Same leading FK prefix country_id as federated_states. HotY shows this as a PURPLE alternate-detail card stacked directly below the federated_states card when a country row is selected as master header.';
+COMMENT ON TABLE  sales_regions              IS 'Alternate (non-geographic) detail of countries. Same leading FK prefix country_id as federated_states. HotX shows this as a PURPLE alternate-detail card stacked directly below the federated_states card when a country row is selected as master header.';
 COMMENT ON COLUMN sales_regions.country_id  IS 'Leading FK to countries, shared prefix lock on detail page.';
 COMMENT ON COLUMN sales_regions.region_id   IS 'TAIL FK COLUMN. Drill link + Browse anchor.';
 
@@ -214,7 +215,7 @@ create table geo.labor_union (
 COMMIT;
 
 -- =============================================================================
--- Expected HotY runtime output (manual verification checklist, post-import):
+-- Expected HotX runtime output (manual verification checklist, post-import):
 --
 -- [NESTED CHAIN — depth 3 with color-coded md-depth-1..3 left borders]
 --   1. Open 'countries' table.

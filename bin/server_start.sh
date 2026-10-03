@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# HotY server start script — location: bin/server_start.sh
+# HotX server start script — location: bin/server_start.sh
 # Works regardless of the current working directory (resolves the
 # project root from the script location).
 set -euo pipefail
 
-# 1. Determine where the HotY project lives on disk (one level up from bin/)
+# 1. Determine where the HotX project lives on disk (one level up from bin/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PID_FILE="/tmp/hoty-server.pid"

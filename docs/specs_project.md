@@ -16,9 +16,9 @@
 ## Problems 
 ```
 [error] Error: SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string 
-     at /home/artejera/Documents/trae_projects/HotY/test-output/node_modules/pg-pool/index.js:45:11 
+     at /home/artejera/Documents/trae_projects/HotX/test-output/node_modules/pg-pool/index.js:45:11 
      at process.processTicksAndRejections (node:internal/process/task_queues:95:5) 
-     at async listRows (/home/artejera/Documents/trae_projects/HotY/test-output/db.js:59:18) 
+     at async listRows (/home/artejera/Documents/trae_projects/HotX/test-output/db.js:59:18) 
 
 We are getting an error: 
      Rows in orders 

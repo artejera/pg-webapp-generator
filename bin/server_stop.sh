@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HotY server stop script — paired with server_start.sh
+# HotX server stop script — paired with server_start.sh
 # Graceful SIGTERM first, escalate to SIGKILL only if stuck.
 # Safe for the Postgres connection pools in memory Map — TERM lets Express shut them down.
 set -euo pipefail
@@ -24,7 +24,7 @@ for a in "$@"; do
   esac
 done
 
-echo "=== HotY server stop ==="
+echo "=== HotX server stop ==="
 echo "  PID_FILE = $PID_FILE"
 echo "  LOG_FILE = $LOG_FILE"
 echo "  PORT     = $PORT"
@@ -55,7 +55,7 @@ if [[ -n "${pid}" ]]; then
       kill -9 "$pid" 2>/dev/null || true
       killed_any=1
     else
-      echo "[GRACEFUL] Sending SIGTERM to HotY server pid=$pid — allowing it to drain PG pools, flush users.json writes, close Express keep-alives."
+      echo "[GRACEFUL] Sending SIGTERM to HotX server pid=$pid — allowing it to drain PG pools, flush users.json writes, close Express keep-alives."
       kill -TERM "$pid" 2>/dev/null || true
       killed_any=1
       # Wait up to 8 seconds, checking every 500ms
@@ -78,10 +78,10 @@ fi
 # (Only use if NO pidfile was present, OR if --all / --force)
 if [[ $FORCE == 1 || $ALL == 1 || -z "${pid}" ]]; then
   echo
-  echo "[SCAN] Checking for stray HotY 'node server.js' processes..."
+  echo "[SCAN] Checking for stray HotX 'node server.js' processes..."
   stray="$(pgrep -af 'node (src/)?server\.js' | grep -v 'pgrep' || true)"
   if [[ -n "${stray}" ]]; then
-    echo "--- found stray HotY node processes ---"
+    echo "--- found stray HotX node processes ---"
     echo "$stray"
     pkill -TERM -f 'node (src/)?server\.js' 2>/dev/null || true
     sleep 1
@@ -127,7 +127,7 @@ echo
 echo "[VERIFY] Checking TCP port $PORT is no longer listening..."
 port_check="$(ss -tln 2>/dev/null | awk '{print $4}' | grep -E "[:.]${PORT}$" || true)"
 if [[ -z "${port_check}" ]]; then
-  echo "[OK ✅] port $PORT is FREE. HotY server stopped successfully."
+  echo "[OK ✅] port $PORT is FREE. HotX server stopped successfully."
 else
   echo "[WARN] port $PORT still shows LISTEN socket(s):"
   echo "$port_check"
