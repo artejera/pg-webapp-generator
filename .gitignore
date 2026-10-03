@@ -14,6 +14,5 @@ output/
 *.swp
 test-output/
 .trae/documents/
-.vscode/
 yarn-debug.log*
 yarn-error.log*

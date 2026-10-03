@@ -1,0 +1,8 @@
+{
+  "workbench.colorCustomizations": {
+    "titleBar.activeBackground": "#4A154B", // Changes the top bar background color
+    "titleBar.activeForeground": "#FFFFFF", // Changes the top bar text color
+    "statusBar.background": "#4A154B",     // Changes the bottom status bar color
+    "activityBar.background": "#611f62"    // Changes the left side icon bar color
+  }
+}

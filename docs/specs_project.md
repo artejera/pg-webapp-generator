@@ -1,79 +1,82 @@
 # PG DDL INTERPRETER
 
+## GLOBALS
+ - do not automatically erase files with extensions .md or .sql or .sh
+ - do not automatically erase files at folders 'docs/' or 'bin/'
+
 ## Initial specification
-- I want to create a generator of webapps 
+- I want to have a webapp 
 - Which would use the DDL extracted from a postgres instance 
-  - Taking as input: hostname,port,dbname,dbpass 
-- To create a full standalone webapp 
-  - Implementing CURD interactions for each table in the DDL 
-  - Simple styling  
-- Containing one dynamic webpage for each table in the DDL 
-  - with a partial listing of the rows in the table 
+- Implementing CURD interactions for each table 
+- Pure interpreter, don't generate any code
+
+### LOGIN DIALOG
+- Presenting an initial dialog for username,hostname,port,dbname,dbpass
+- - with a partial listing of the rows in the table 
   - interactively paging rows up and down 
-- With options for interactively modify, create or delete any row 
-- With gui elements to report errors from the database
+  - With options for interactively modify, create or delete any row 
 
-## Problems 
-```
-[error] Error: SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string 
-     at /home/artejera/Documents/trae_projects/HotX/test-output/node_modules/pg-pool/index.js:45:11 
-     at process.processTicksAndRejections (node:internal/process/task_queues:95:5) 
-     at async listRows (/home/artejera/Documents/trae_projects/HotX/test-output/db.js:59:18) 
+## PAGE HEADER
+- Present used credentials (minus passwd) at webpage header
+- Present database schema selector (UI) and schema selector (UI)
+- define and display a software version timestamp (formatted as yymmdd.hhmm)
+- Present logout/disconnect button, which will 
+  - disconnect the user from the database instance
+  - close all ui objects and re-enter the initial dialog for username,hostname,port,dbname,dbpass
 
-We are getting an error: 
-     Rows in orders 
-     Failed to load rows 
-     SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string
- ```
-## Other requests
-- Can we interact with the tables of a database schema without generating specific code
-  - implementing an interpreter of the DDL , 
-  - and also be able to re-enter the credentials page at any moment ?
+## SIDE BAR
+- Do not Present a left side bar, or a right side bar
 
-- how can i get an itemized specification of this project ?
-
-- can we remove the 'generator' feature and leave only 'interpreter' ?
-do not automatically erase files with extensions .md or .sql [ also not extension .sh ]
+## BROWSER TABLE
+  - Mark an error if the selected table has no keys
+  - Generate pop-ups to report any error
+  - visually distinguish key fields of current table
+  - use ui-tooltips in the table headers to provide info on data type and nullable labels
+  - Prepend an 'actions' column to contain each row's buttons: edit, delete, use as 'master table row'
+    - These 'buttons' are clickable 'icons', and may have tooltips to provide info on their function
+  - The actions column of the headers of the browser table has the 'cancel' button, 
+    - which will close its browser
 
 ## MASTER-DETAIL
-- implement master table and a detail table
-  - the detail table has more than one key
-  - the master table contains all the keys of the detail table, excepting the last one
-  - when the master table is being browsed 
-    - a master table ui-row may be selected to become a ui-header
+- implement ui design and interactions to implement the master-detail relationship between tables
+  - the detail table has all the keys of its master table, plus at least one more, which complete its own key set
+  - when the master table is being browsed (before activating its detail table): 
+    - a master table row may be selected to become the master row  of the 'detail table'
+      - the 'detail table' is then activated, and shown under to the master table ui-header
       - only one row of the master table may be selected this way
       - other rows of the master table are henceforth excluded from the webpage presentation
       - the selected master table row cannot be edited (modified, deleted) while it remains in master-table state
     - a subordinate table row browser, for the detail table, is shown under to the master table ui-header
     - the range of rows shown in the detail table are constraind to those rows whose keys match the corresponding columns of the master table row selected
 
-## Other requests
-- select table within chosen schema with a table selector, next to the schema selector
-- visually distinguish key fields of current table
-- use ui-tooltips to provide info on data type and nullable labels
+### further master-detail
+- enable nested master-detail, so for example, if you may have:
+  - a master table 'countries' with key 'country_id'
+  - a detail table 'federated states' with keys 'country_id', 'state_id'
+  - a nested detail table 'counties' with keys 'country_id', 'state_id', 'county_id'
+- enable alternate master-detail, so for example, if you may have:
+  - a master table 'countries' with key 'country_id'
+  - a alternate detail table 'federated states' with keys 'country_id', 'state_id'
+  - an alternate detail table 'sales region' with keys 'country_id', 'region_id'
 
-## Authentication and Authorization: 
-``` commit c38615258b6d74f8725cbf1b1cc9311a93607559 (HEAD -> main, origin/main) ```
-- user/pass authentication, 
-  - implement user table independent of the database credentials:
-    - username 
-    - password (stored with one-way-encription) 
-    - role 
-      - 'admin' is able to edit any user and any field 
-      - 'normal' can only edit its own password 
-- ***STARTED***:  revert authentication to database credentials, discard user table
-  - ***STARTED***:  display user in page header, along with software version and today's date&time
-  - ***STARTED***:  enable user to log out
-  - ***STARTED***: enable user complete name stored in pg user description
-  - ***STARTED***:  enable user to change its password and its name(description)
 
-## Other requests
-- enable a database schema selector (UI) 
-- define and display a software version timestamp: 
-  - format yymmdd.hhmm 
-- update SPECIFICATION.md 
+## STARTED search form
+The table browser displays will have an extra state: 'searching', with a special button, which:
+- will cause the table browser to enter the 'searching' state
+- will cause the display of a search form
+  - with the same fields of a normal form
+  - with its field values initialized to blanks, so that the user can input search criteria,
+  - The search values understand patterns similar to sql's 'like'.
+- When the user submits the search form
+  - the base table browser is filtered to show only the rows whose values match the search criteria.
+  - When the user cancels the search, then the table browser is reset to show all rows, and the 'searching' state is exited.
+- if the base table browser is a 'detail table', the key fields fixed by its relation to its 'master table', are not searchable.
+- Regarding displayed browser/forms/search-stuff currently operating, please make sure that all these are destroyed if the operator changes table or schema.
 
-<hr/><hr/><hr/><br/>
+## STARTED: LIMITS
+report an error if a limit is exceeded
+- maximum number of rows displayed in a table browser is 1000
+- maximum time to execute a query is 10 seconds
 
 # PLANS
 
@@ -95,6 +98,7 @@ Navigation buttons, shown in predictable locations:
 - Plan for a button that would suspend/interrupt the current transaction
 - Plan for a button that would commit the current transaction
   - report commit failure
+- maximum time to hold a transaction state is 1 hours
   
 ## PLAN SQL EXPRESSIONS and DECORATIONS:
 - sql-expression execution
@@ -102,56 +106,3 @@ Navigation buttons, shown in predictable locations:
 - sql-expression 
 
 <hr/><hr/><hr/><br/>
-
-# ***STARTED 2026-10-01 1550***
-
-## STARTED further master-detail
-- enable nested master-detail, so for example, if you may have:
-  - a master table 'countries' with key 'country_id'
-  - a detail table 'federated states' with keys 'country_id', 'state_id'
-  - a detail table 'counties' with keys 'country_id', 'state_id', 'county_id'
-- enable alternate master-detail, so for example, if you may have:
-  - a master table 'countries' with key 'country_id'
-  - a detail table 'federated states' with keys 'country_id', 'state_id'
-  - an alternate detail table 'sales region' with keys 'country_id', 'region_id'
-
-## Drill-down on foreign keys
-- For cases of a table browser, displaying a field refering to a foreign key, and only for the case of the least significant key of the foreign table
-  - enable drill-down to a form displaying more fields of the foreign tuple, read-only. 
-
-- For cases of a form, displaying a field refering to a foreign key, and only for the case of the least significant key of the foreign table
-  - enable exploration through a table browser on the foreign table, read-only. 
-  - enable value selection of the form's origin field, selectiong on the displayed table browser.
-
-## STARTED search form
-The table browser displays will have an extra state: 'searching', with a special button, which:
-- will cause the table browser to enter the 'searching' state
-- will cause the display of a search form
-  - with the same fields of a normal form
-  - with its field values initialized to blanks, so that the user can input search criteria,
-  - The search values understand patterns similar to sql's 'like'.
-- When the user submits the search form
-  - the base table browser is filtered to show only the rows whose values match the search criteria.
-  - When the user cancels the search, then the table browser is reset to show all rows, and the 'searching' state is exited.
-- if the base table browser is a 'detail table', the key fields fixed by its relation to its 'master table', are not searchable.
-
-## STARTED: LIMITS
-report an error if a limit is exceeded
-- maximum number of rows displayed in a table browser is 1000
-- maximum time to execute a query is 10 seconds
-- maximum time to hold a transaction state is 1 hours
-
-## STARTED : 2026/10/02 11:16
-- Regarding displayed browser/forms/search-stuff currently operating, please make sure that all these are destroyed if the operator  changes table or schema in the left side bar.
-
-- Please enable a compress/expand control on the left side bar
-
-- Please consolidate all table browser buttons on the single leftmost column, with each row displaying all the its enabled buttons as small icons (or as a single iconized character)
-
--  Regarding browser table column headerts, check if it is possible to display as a TOOLTIP
-
-- When i enter to edit the table geo.labor_union, and provide an invalid country_id, i don't get the expected browsable (and selectable) list of available country_ids
-<hr/><hr/>
-
-# TODO
-- When the left side bar is collapsed, enlarge the main content area

@@ -1,3 +1,16 @@
+
+## Drill-down on foreign keys
+- For cases of a table browser, displaying a field refering to a foreign key, and only for the case of the least significant key of the foreign table
+  - enable drill-down to a form displaying more fields of the foreign tuple, read-only. 
+
+- For cases of a form, displaying a field refering to a foreign key, and only for the case of the least significant key of the foreign table
+  - enable exploration through a table browser on the foreign table, read-only. 
+  - enable value selection of the form's origin field, selectiong on the displayed table browser.
+
+- When i enter to edit the table geo.labor_union, and provide an invalid country_id, i don't get the expected browsable (and selectable) list of available country_ids
+<hr/><hr/>
+
+# DRILL-DOWN CASES
 From the 'geo.counties' table and without any other table or form:
 - Assume we have entered a table bowser
 - Assume the table browsed has all the keys of a foreign table
