@@ -65,7 +65,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .icon-btn.success:hover { background: #e8f5e9; border-color: #81c784; }
 .icon-btn.warn:hover { background: #fff3e0; border-color: #ffb74d; }
 .tooltip { position: relative; }
-.tooltip:hover::after { content: attr(data-tip); position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%); background: #222; color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; z-index: 100; pointer-events: none; }
+.tooltip:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 125%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #222;
+  color: white;
+  padding: 6px 10px;
+  border-radius: 5px;
+  font-size: 11px;
+  white-space: pre-line;
+  max-width: 420px;
+  min-width: 140px;
+  line-height: 1.45;
+  z-index: 200;
+  pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.3);
+}
 
 /* ---------- TABLE ---------- */
 .table-wrap { max-height: 500px; overflow: auto; }
@@ -153,7 +172,7 @@ table.data .null-val { color: #bbb; font-style: italic; }
 .fk-map-wrap .fk-node text.col { font-size: 9px; fill: #555; }
 .fk-map-wrap .fk-node text.col.pk { fill: #2874a6; font-weight: 700; }
 .fk-map-wrap .fk-link { fill: none; stroke: #95a5a6; stroke-width: 1.2; }
-.fk-map-wrap .fk-label { font-size: 9px; fill: #7f8c8d; }
+.fk-map-wrap .fk-label { font-size: 11px; fill: #2c3e50; font-family: monospace; paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }
 </style>
 </head>
 <body>
@@ -482,61 +501,75 @@ async function ensureTxn(forAction='write operation') {
   }
 }
 
-function showFkMapPopup() {
+async function showFkMapPopup() {
   const schema = state.currentSchema;
   if (!schema) { toast('Select a schema first', 'warn'); return; }
   const tables = state.tables.slice().sort((a,b)=>a.table_name.localeCompare(b.table_name));
   if (!tables.length) { toast('No tables in schema', 'warn'); return; }
-  const tblByName = new Map(tables.map(t => [t.table_name, t]));
-  const nodeW = 180;
-  const perRow = Math.max(3, Math.min(6, Math.ceil(Math.sqrt(tables.length))));
-  const rowH = 110;
-  const pad = 40;
+  let allColsByTable = {};
+  try {
+    const r = await api('/api/columns', { query: { schema } });
+    allColsByTable = (r && r.byTable) ? r.byTable : {};
+  } catch(e) {
+    allColsByTable = {};
+  }
+  const tblByName = new Map(tables.map(t => [t.table_name, Object.assign({}, t, {
+    _cols: (allColsByTable[t.table_name]||[]).map(c=>c.column_name),
+    _pkSet: new Set((allColsByTable[t.table_name]||[]).filter(c=>c.is_primary_key).map(c=>c.column_name))
+  })]));
+  const nodeW = 280;
+  const perRow = Math.max(2, Math.min(4, Math.ceil(Math.sqrt(tables.length))));
+  const maxColsShown = 12;
+  const extraRowPerCol = 13;
+  const headerH = 34;
+  const baseH = headerH + 28;
+  const rowH = Math.max(200, baseH + maxColsShown * extraRowPerCol);
+  const pad = 60;
+  const gapX = 80;
+  const gapY = 60;
   const rows = Math.ceil(tables.length / perRow);
-  const svgW = pad*2 + perRow*nodeW + (perRow-1)*30;
-  const svgH = pad*2 + rows*rowH + (rows-1)*20;
-  const centerX = (i) => pad + (i % perRow) * (nodeW + 30) + nodeW/2;
-  const centerY = (i) => pad + Math.floor(i / perRow) * (rowH + 20) + rowH/2;
-  const leftX = (i) => pad + (i % perRow) * (nodeW + 30);
+  const svgW = pad*2 + perRow*nodeW + (perRow-1)*gapX;
+  const svgH = pad*2 + rows*rowH + (rows-1)*gapY;
+  const centerX = (i) => pad + (i % perRow) * (nodeW + gapX) + nodeW/2;
+  const centerY = (i) => pad + Math.floor(i / perRow) * (rowH + gapY) + rowH/2;
+  const leftX = (i) => pad + (i % perRow) * (nodeW + gapX);
   const rightX = (i) => leftX(i) + nodeW;
-  const topY = (i) => pad + Math.floor(i / perRow) * (rowH + 20);
+  const topY = (i) => pad + Math.floor(i / perRow) * (rowH + gapY);
   const botY = (i) => topY(i) + rowH;
   let nodesSvg = '';
   tables.forEach((t, i) => {
+    const meta = tblByName.get(t.table_name) || t;
     const fksInThis = (state.fks||[]).filter(f => (f.child_schema===schema && f.child_table===t.table_name) || (f.parent_schema===schema && f.parent_table===t.table_name));
     const hasAnyFk = fksInThis.length > 0;
     const x = leftX(i), y = topY(i);
     nodesSvg += `<g class="fk-node ${hasAnyFk?'pk':''}" transform="translate(${x},${y})">`;
-    nodesSvg += `<rect width="${nodeW}" height="${rowH}" rx="5" />`;
-    nodesSvg += `<text class="label" x="${nodeW/2}" y="18" text-anchor="middle">${esc(t.table_name)}${t.has_primary_key?'':''}</text>`;
-    nodesSvg += `<line x1="10" y1="26" x2="${nodeW-10}" y2="26" stroke="#ccc" />`;
-    // Show up to 6 columns then "+ N more"
-    let colNames;
-    try { colNames = state.stack[0] && state.stack[0].schema===schema && state.stack[0].table===t.table_name ? state.stack[0].columns.map(c=>c.column_name) : []; } catch(_) { colNames = []; }
-    const pks = new Set(colNames.length ? colNames.filter((n,idx) => {
-      const c = state.stack[0].columns.find(x=>x.column_name===n); return c && c.is_primary_key;
-    }) : []);
-    // FK columns from metadata
+    nodesSvg += `<rect width="${nodeW}" height="${rowH}" rx="6" />`;
+    nodesSvg += `<text class="label" x="${nodeW/2}" y="20" text-anchor="middle">${esc(t.table_name)}${t.has_primary_key?' 🔑':''}</text>`;
+    nodesSvg += `<line x1="10" y1="30" x2="${nodeW-10}" y2="30" stroke="#ccc" />`;
+    let colNames = (meta._cols && meta._cols.length) ? meta._cols : [];
+    const pks = (meta._pkSet && meta._pkSet.size) ? meta._pkSet : new Set();
     const knownFkCols = new Set();
     for (const f of state.fks||[]) {
       if (f.child_schema===schema && f.child_table===t.table_name) (f.child_columns||[]).forEach(c=>knownFkCols.add(c));
     }
-    let dispNames = colNames.length ? colNames : (t.cols||[]);
-    if (!dispNames.length) dispNames = knownFkCols.size ? Array.from(knownFkCols) : ['(click table to see cols)'];
-    const maxC = 6;
-    const shown = dispNames.slice(0, maxC);
+    if (!colNames.length) colNames = knownFkCols.size ? Array.from(knownFkCols) : ['(columns unavailable)'];
+    const shown = colNames.slice(0, maxColsShown);
     shown.forEach((n, k) => {
-      const ispk = pks.has(n) || (k === 0 && !colNames.length && t.has_primary_key);
+      const ispk = pks.has(n);
       const isfk = knownFkCols.has(n);
-      const label = (ispk?'🔑 ':'') + (isfk?'➡ ':'') + n;
-      nodesSvg += `<text class="col ${ispk?'pk':''}" x="12" y="${42 + k*11}">${esc(label).slice(0,24)}</text>`;
+      const prefix = (ispk?'🔑 ':'') + (isfk?'➡ ':'');
+      const label = prefix + n;
+      const maxChars = Math.floor((nodeW - 24) / 6.8);
+      const clipped = label.length > maxChars ? (label.slice(0, maxChars-2) + '…') : label;
+      nodesSvg += `<text class="col ${ispk?'pk':''}" x="12" y="${headerH + k*extraRowPerCol}">${esc(clipped)}</text>`;
     });
-    if (dispNames.length > maxC) {
-      nodesSvg += `<text class="col" x="12" y="${42 + maxC*11}" fill="#999">+ ${dispNames.length-maxC} more cols…</text>`;
+    if (colNames.length > maxColsShown) {
+      nodesSvg += `<text class="col" x="12" y="${headerH + maxColsShown*extraRowPerCol}" fill="#999">+ ${colNames.length-maxColsShown} more columns…</text>`;
     }
     nodesSvg += `</g>`;
   });
   let linksSvg = '';
+  let labelSvg = '';
   (state.fks||[]).forEach(f => {
     if (!(f.child_schema===schema && f.parent_schema===schema)) return;
     const cIdx = tables.findIndex(t => t.table_name === f.child_table);
@@ -547,11 +580,13 @@ function showFkMapPopup() {
     if (cIdx < pIdx) { x1 = rightX(cIdx); y1 = centerY(cIdx); x2 = leftX(pIdx); y2 = centerY(pIdx); }
     else { x1 = leftX(cIdx); y1 = centerY(cIdx); x2 = rightX(pIdx); y2 = centerY(pIdx); }
     const midx = (x1+x2)/2;
-    const colPairLabel = (f.child_columns||[]).map((c,i) => `${c}=${(f.parent_columns||[])[i]}`).join(',');
+    const colPairLabel = (f.child_columns||[]).map((c,i) => `${c}=${(f.parent_columns||[])[i]}`).join(', ');
     const pathD = `M ${x1} ${y1} C ${midx} ${y1}, ${midx} ${y2}, ${x2} ${y2}`;
     linksSvg += `<path class="fk-link" d="${pathD}" marker-end="url(#arr)" />`;
-    const midX = (x1+x2)/2, midY = (y1+y2)/2;
-    linksSvg += `<text class="fk-label" x="${midX}" y="${midY - 3}" text-anchor="middle" style="font-family:monospace;">${esc(colPairLabel).slice(0, 40)}</text>`;
+    const midX = (x1+x2)/2;
+    const midY = (y1+y2)/2;
+    const offsetY = Math.abs(y2 - y1) < 10 ? -10 : (sameRow ? -10 : -8);
+    labelSvg += `<text class="fk-label" x="${midX}" y="${midY + offsetY}" text-anchor="middle" dominant-baseline="middle">${esc(colPairLabel)}</text>`;
   });
   const arrowDefs = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#95a5a6" /></marker></defs>`;
   const body = `
@@ -560,16 +595,18 @@ function showFkMapPopup() {
         ${arrowDefs}
         ${linksSvg}
         ${nodesSvg}
+        ${labelSvg}
       </svg>
     </div>
-    <div style="margin-top:10px;font-size:11px;color:#666;">
-      Blue-outlined nodes = participates in at least 1 FK. Arrow direction: child → parent (FK points to PK). 🔑 = PK column. ➡ = FK column.
+    <div style="margin-top:12px;font-size:12px;color:#444;line-height:1.5;">
+      <div><strong>Legend:</strong> Blue-outlined tables = participate in at least 1 FK. Direction of arrow: <code>child → parent</code> (FK points to PK).</div>
+      <div><span style="color:#2874a6;font-weight:700;">🔑 = Primary key column</span> · <span>➡ = Foreign key column</span> · Arrow labels: <code>child_col = parent_col</code> pairs.</div>
     </div>`;
   showConfirm(`Schema: ${esc(schema)} — Foreign key graph`, '', {confirmText:'Close', cancelText:null}).catch(()=>{});
   const modal = document.querySelector('.modal');
   if (modal) {
-    modal.style.maxWidth = '95vw';
-    modal.style.width = (Math.min(1200, svgW + 80)) + 'px';
+    modal.style.maxWidth = '98vw';
+    modal.style.width = (Math.min(1600, svgW + 80)) + 'px';
     modal.querySelector('.modal-body').innerHTML = body;
     const okBtn = modal.querySelector('[data-act="ok"]');
     const cancelBtn = modal.querySelector('[data-act="cancel"]');
@@ -866,6 +903,9 @@ function renderRowsTable(entry, idx) {
   if (!entry.rows.length) {
     return `<div class="empty">No rows match current filters.</div>`;
   }
+  const masterActive = entry.masterRowIndex != null;
+  const editActive = entry.editing && entry.editing.mode === 'edit' && entry.editing.rowIndex != null;
+  if (editActive) return '';
   const isMasterRow = (rI) => entry.masterRowIndex === rI;
   const pkSet = new Set(entry.pkColumns);
   // Determine active sort state for column header sort-ctrl indicators
@@ -907,8 +947,6 @@ function renderRowsTable(entry, idx) {
   // Row display filtering:
   // - hide non-master siblings when master active
   // - hide non-edit siblings when editing a specific row (edit form shows above anyway but clean up rows)
-  const masterActive = entry.masterRowIndex != null;
-  const editActive = entry.editing && entry.editing.mode === 'edit' && entry.editing.rowIndex != null;
   for (let rI = 0; rI < entry.rows.length; rI++) {
     if (masterActive && rI !== entry.masterRowIndex) continue;
     if (editActive && rI !== entry.editing.rowIndex) continue;
@@ -930,12 +968,13 @@ function renderRowsTable(entry, idx) {
   }
 
   html += `</tbody></table></div>`;
-  if (masterActive) html += `<div class="banner info" style="border-top:none;border-radius:0;">Siblings hidden while a master row is active — uncheck the master row's 📌 button to show all rows again.</div>`;
-  else if (editActive) html += `<div class="banner info" style="border-top:none;border-radius:0;">Siblings hidden during row edit — Cancel or Submit to show all rows again.</div>`;
   return html;
 }
 
 function renderPagination(entry, idx) {
+  const masterActive = entry.masterRowIndex != null;
+  const editActive = entry.editing && entry.editing.mode === 'edit' && entry.editing.rowIndex != null;
+  if (masterActive || editActive) return '';
   const totalPages = Math.max(1, Math.ceil((entry.total||0) / entry.pageSize));
   const cur = entry.page + 1;
   return `<div class="pagination">

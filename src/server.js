@@ -210,10 +210,10 @@ app.get('/api/columns', async (req, res) => {
   try {
     const schema = req.query.schema || 'public';
     const table = req.query.table;
-    if (!table) throw new Error('table query parameter required');
 
     const colsSql = `
       SELECT
+        c.table_name,
         c.ordinal_position,
         c.column_name,
         c.data_type,
@@ -238,13 +238,14 @@ app.get('/api/columns', async (req, res) => {
          AND tc.table_name = kcu.table_name
         WHERE tc.constraint_type = 'PRIMARY KEY'
       ) pk ON pk.table_schema = c.table_schema AND pk.table_name = c.table_name AND pk.column_name = c.column_name
-      WHERE c.table_schema = $1 AND c.table_name = $2
-      ORDER BY c.ordinal_position
+      WHERE c.table_schema = $1 ${table ? 'AND c.table_name = $2' : ''}
+      ORDER BY c.table_name, c.ordinal_position
     `;
-    const cols = await runQuery(req.sessionId, colsSql, [schema, table], { enforceLimit: false });
+    const cols = await runQuery(req.sessionId, colsSql, table ? [schema, table] : [schema], { enforceLimit: false });
 
     const fkSql = `
       SELECT
+        kcu.table_name,
         kcu.column_name,
         tc.constraint_name,
         ccu.table_schema AS foreign_table_schema,
@@ -260,23 +261,39 @@ app.get('/api/columns', async (req, res) => {
         ON tc.constraint_name = ccu.constraint_name
        AND tc.table_schema = ccu.table_schema
       WHERE tc.constraint_type = 'FOREIGN KEY'
-        AND tc.table_schema = $1 AND tc.table_name = $2
+        AND tc.table_schema = $1 ${table ? 'AND tc.table_name = $2' : ''}
       ORDER BY tc.constraint_name, kcu.ordinal_position
     `;
-    const fks = await runQuery(req.sessionId, fkSql, [schema, table], { enforceLimit: false });
+    const fks = await runQuery(req.sessionId, fkSql, table ? [schema, table] : [schema], { enforceLimit: false });
 
-    const fkByCol = new Map();
+    const fkByKey = new Map();
     for (const f of fks.rows) {
-      if (!fkByCol.has(f.column_name)) fkByCol.set(f.column_name, []);
-      fkByCol.get(f.column_name).push(f);
+      const k = (f.table_name || '') + '|' + f.column_name;
+      if (!fkByKey.has(k)) fkByKey.set(k, []);
+      fkByKey.get(k).push(f);
     }
 
-    const columns = cols.rows.map(c => ({
-      ...c,
-      foreign_keys: fkByCol.get(c.column_name) || []
-    }));
-
-    ok(res, { columns });
+    if (table) {
+      const columns = cols.rows.map(c => {
+        const k = c.table_name + '|' + c.column_name;
+        return {
+          ...c,
+          foreign_keys: fkByKey.get(k) || []
+        };
+      });
+      ok(res, { columns });
+    } else {
+      const byTable = {};
+      for (const c of cols.rows) {
+        const k = c.table_name + '|' + c.column_name;
+        if (!byTable[c.table_name]) byTable[c.table_name] = [];
+        byTable[c.table_name].push({
+          ...c,
+          foreign_keys: fkByKey.get(k) || []
+        });
+      }
+      ok(res, { byTable });
+    }
   } catch (e) { err(res, e); }
 });
 

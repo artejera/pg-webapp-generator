@@ -120,13 +120,17 @@ Navigation buttons, shown in predictable locations:
 # DONE 2026-10-03 Problem vbox stuck:
 Your last version seems great, really, i'm making my list of fixes, really minor. However, i tested it with a really large table, about 29000 rows and some blobs in, and ... my whole vbox VM (with 16gb,debian), got stuck and i had to restart it ... also, the postgres server indicated a stale open connection, without transaction, performing a pg_cancel_backend()
 
-# NEXT 2026-10-04B:
+# DONE 2026-10-04B:
 - In those cases where it was asked to 'hide' all browsed rows, where the UI shows the message "Siblings hidden during row edit — Cancel or Submit to show all rows again.", PLEASE hide the browser complete, don't show any messages.
 - These requests were made before and were not met:
   - Can we Show HotX version in connection dialog
   . Can you show the field's data-type tooltip in the table browser headers, as you already do in the form labels?
-## NEXT - fk diagram
+
+## DONE - fk diagram  2026-10-04C:
 - Please: Can you make more space for the labels of the arrows of the foreign-key relations diagram ?
 - Please: Can you make sure that the labels are not truncated, and that they are readable 
   - The arrow's labels are are the most important information to display in this diagram.
 - Please: that some of the squares in the diagram contain the list of fields of the table, and some others don't
+
+# DONE 2026-10-04D:
+- when i select the "use as master row" button/icon, can you please leve displayed the fields from that row , as a browser table with a single row ?
