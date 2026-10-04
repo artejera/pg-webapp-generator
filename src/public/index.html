@@ -12,6 +12,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .login-card { background: #fff; border-radius: 10px; padding: 28px 32px; width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
 .login-card h1 { font-size: 20px; color: #4A154B; margin-bottom: 4px; }
 .login-card .sub { color: #666; font-size: 12px; margin-bottom: 18px; }
+.login-version { color: #888; font-family: monospace; font-size: 11px; margin: -14px 0 14px; background: #f8f8fb; padding: 2px 8px; border-radius: 4px; display: inline-block; }
 .login-card label { display: block; margin-top: 10px; font-size: 12px; color: #444; font-weight: 600; }
 .login-card input { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 5px; margin-top: 4px; font-size: 13px; }
 .login-card input:focus { outline: none; border-color: #611f62; box-shadow: 0 0 0 2px rgba(97,31,98,0.2); }
@@ -35,6 +36,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .btn-begin { background: #27ae60; color: white; }
 .btn-commit { background: #2980b9; color: white; }
 .btn-rollback { background: #e67e22; color: white; }
+.btn-rollback.txn-error { background: #c0392b; animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(192,57,43,0.7);} 50% { box-shadow: 0 0 0 6px rgba(192,57,43,0);} }
 .txn-badge { background: #f39c12; color: #000; padding: 3px 8px; border-radius: 10px; font-weight: 700; font-size: 11px; }
 
 /* ---------- MAIN CONTENT ---------- */
@@ -67,9 +70,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* ---------- TABLE ---------- */
 .table-wrap { max-height: 500px; overflow: auto; }
 table.data { width: 100%; border-collapse: collapse; font-size: 12px; }
-table.data th { background: #ecf0f1; position: sticky; top: 0; padding: 8px 10px; text-align: left; border-bottom: 2px solid #bdc3c7; font-weight: 600; white-space: nowrap; z-index: 2; cursor: default; }
+table.data th { background: #ecf0f1; position: sticky; top: 0; padding: 8px 10px; text-align: left; border-bottom: 2px solid #bdc3c7; font-weight: 600; white-space: nowrap; z-index: 2; }
 table.data th.pk-col { background: #d6eaf8; border-bottom-color: #5dade2; }
+table.data th .sort-ctrl { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; margin-left:3px; border:1px solid #bbb; border-radius:3px; background:white; color:#888; font-size:9px; cursor:pointer; vertical-align:middle; }
+table.data th .sort-ctrl:hover { border-color:#4A154B; color:#4A154B; }
+table.data th .sort-ctrl.asc { background:#27ae60; border-color:#27ae60; color:white; }
+table.data th .sort-ctrl.desc { background:#2980b9; border-color:#2980b9; color:white; }
 table.data th .dtype { font-size: 10px; color: #7f8c8d; font-weight: 400; }
+table.data th .column-name { display: inline-flex; align-items: center; }
 table.data td { padding: 6px 10px; border-bottom: 1px solid #eee; vertical-align: middle; }
 table.data td.pk-col { background: #f0f7fc; font-weight: 600; }
 table.data td.actions { white-space: nowrap; width: 1px; background: #fafbfc; }
@@ -135,6 +143,17 @@ table.data .null-val { color: #bbb; font-style: italic; }
 .empty { padding: 40px; text-align: center; color: #999; font-size: 13px; }
 .empty.large { padding: 80px; font-size: 15px; }
 .empty.large .emoji { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+
+/* ---------- FK RELATIONS MAP (inline SVG popup, no CDN / external libs) ---------- */
+.fk-map-wrap { max-height: 75vh; overflow: auto; }
+.fk-map-wrap svg { display: block; background: #fafbfc; border: 1px solid #e8e8f0; border-radius: 6px; }
+.fk-map-wrap .fk-node rect { fill: #fff; stroke: #4A154B; stroke-width: 1.5; }
+.fk-map-wrap .fk-node.pk rect { fill: #d6eaf8; stroke: #2874a6; }
+.fk-map-wrap .fk-node text.label { font-size: 11px; font-weight: 700; fill: #2c3e50; }
+.fk-map-wrap .fk-node text.col { font-size: 9px; fill: #555; }
+.fk-map-wrap .fk-node text.col.pk { fill: #2874a6; font-weight: 700; }
+.fk-map-wrap .fk-link { fill: none; stroke: #95a5a6; stroke-width: 1.2; }
+.fk-map-wrap .fk-label { font-size: 9px; fill: #7f8c8d; }
 </style>
 </head>
 <body>
@@ -157,18 +176,12 @@ const state = {
   currentSchema: localStorage.getItem('hotx_schema') || 'public',
   tables: [],
   currentTable: localStorage.getItem('hotx_table') || null,
-  columns: null,           // for current root table
-  fks: null,               // [{child_schema, child_table, parent_schema, parent_table, child_columns[], parent_columns[]}]
+  columns: null,
+  fks: null,
   version: null,
   txnActive: false,
-  /* master-detail stack:
-     [ {table, schema, columns, pkColumns, masterRow, filters:[{column,value}], depth, alternateOf? }, ... ]
-     first entry = root table browser (no masterRow, no filters)
-   */
+  txnErrorPending: false,
   stack: [],
-  /* stack[i].editing = {mode:'edit'|'create', data:{...}}
-     stack[i].searching = {active:true, criteria:[{column, value}]}
-  */
 };
 
 /* ---------- Utilities ---------- */
@@ -242,11 +255,13 @@ function render() {
 
 /* ---------- LOGIN ---------- */
 function renderLogin() {
+  const version = state.version ? `v${state.version}` : '';
   return `
   <div class="login-overlay">
     <div class="login-card">
       <h1>HotX</h1>
       <div class="sub">PG DDL Interpreter — Pure Runtime</div>
+      ${version ? `<div class="login-version">${version}</div>` : ''}
       <label>Username
         <input id="lg-user" value="${esc(localStorage.getItem('hotx_user')||'postgres')}" autocomplete="username">
       </label>
@@ -336,6 +351,7 @@ function renderHeader() {
   const c = state.creds || {};
   const schemasOpts = state.schemas.map(s => `<option value="${esc(s)}" ${s===state.currentSchema?'selected':''}>${esc(s)}</option>`).join('');
   const tablesOpts = state.tables.map(t => `<option value="${esc(t.table_name)}" ${t.table_name===state.currentTable?'selected':''}>${esc(t.table_name)}${t.has_primary_key?'':' ⚠️'}</option>`).join('');
+  const rollbackErrorClass = (state.txnActive && state.txnErrorPending) ? ' txn-error' : '';
   return `
   <div class="header">
     <div class="logo">⚡ HotX</div>
@@ -358,9 +374,10 @@ function renderHeader() {
       ${state.txnActive
         ? `<span class="txn-badge">TXN ACTIVE</span>
            <button class="btn-commit" data-txn="commit">Commit</button>
-           <button class="btn-rollback" data-txn="rollback">Rollback</button>`
+           <button class="btn-rollback${rollbackErrorClass}" data-txn="rollback" title="${state.txnErrorPending?'Postgres error detected — transaction must be rolled back.':'Rollback uncommitted changes'}">Rollback${state.txnErrorPending?' ⚠':''}</button>`
         : `<button class="btn-begin" data-txn="begin">Begin TXN</button>`}
     </div>
+    <button class="icon-btn" id="hdr-fkmap" title="Show FK relations (schema graph)" ${!state.currentSchema?'disabled':''} style="background:white;border:1px solid #ddd;">🔗</button>
     <button class="btn-logout" id="hdr-logout">Logout</button>
     <div class="ver">v${esc(state.version||'')}</div>
   </div>`;
@@ -402,16 +419,19 @@ function attachHeaderHandlers() {
     render();
   };
   $('#hdr-logout').onclick = doLogout;
+  $('#hdr-fkmap').onclick = () => showFkMapPopup();
   $$('#txn-ctrls [data-txn]').forEach(b => b.onclick = async () => {
     const act = b.dataset.txn;
     let deferredToast = null;
     try {
-      if (act === 'begin') { await api('/api/txn/begin', { method: 'POST', body: {} }); deferredToast = ['Transaction started', 'success']; }
+      if (act === 'begin') { await api('/api/txn/begin', { method: 'POST', body: {} }); state.txnErrorPending = false; deferredToast = ['Transaction started', 'success']; }
       if (act === 'commit') {
         try {
           await api('/api/txn/commit', { method: 'POST', body: {} });
+          state.txnErrorPending = false;
           deferredToast = ['Committed', 'success'];
         } catch(e) {
+          state.txnErrorPending = true;
           render();
           showConfirm('Commit failed', e.message, {confirmText:'OK', cancelText:null, danger:true});
           return;
@@ -421,6 +441,7 @@ function attachHeaderHandlers() {
         const ok = await showConfirm('Rollback?', 'All uncommitted changes will be discarded.', {confirmText:'Rollback', danger:true});
         if (!ok) return;
         await api('/api/txn/rollback', { method: 'POST', body: {} });
+        state.txnErrorPending = false;
         deferredToast = ['Rolled back', 'warn'];
       }
       await refreshTxnStatus();
@@ -441,8 +462,120 @@ async function doLogout() {
   state.tables = [];
   state.schemas = [];
   state.currentTable = null;
+  state.txnActive = false;
+  state.txnErrorPending = false;
   localStorage.removeItem('hotx_sid');
   render();
+}
+
+async function ensureTxn(forAction='write operation') {
+  if (state.txnActive) return true;
+  try {
+    await api('/api/txn/begin', { method: 'POST', body: {} });
+    state.txnErrorPending = false;
+    await refreshTxnStatus();
+    toast(`Auto-began TXN for ${forAction} — remember to Commit or Rollback.`, 'warn');
+    return true;
+  } catch(e) {
+    toast(e.message, 'error');
+    return false;
+  }
+}
+
+function showFkMapPopup() {
+  const schema = state.currentSchema;
+  if (!schema) { toast('Select a schema first', 'warn'); return; }
+  const tables = state.tables.slice().sort((a,b)=>a.table_name.localeCompare(b.table_name));
+  if (!tables.length) { toast('No tables in schema', 'warn'); return; }
+  const tblByName = new Map(tables.map(t => [t.table_name, t]));
+  const nodeW = 180;
+  const perRow = Math.max(3, Math.min(6, Math.ceil(Math.sqrt(tables.length))));
+  const rowH = 110;
+  const pad = 40;
+  const rows = Math.ceil(tables.length / perRow);
+  const svgW = pad*2 + perRow*nodeW + (perRow-1)*30;
+  const svgH = pad*2 + rows*rowH + (rows-1)*20;
+  const centerX = (i) => pad + (i % perRow) * (nodeW + 30) + nodeW/2;
+  const centerY = (i) => pad + Math.floor(i / perRow) * (rowH + 20) + rowH/2;
+  const leftX = (i) => pad + (i % perRow) * (nodeW + 30);
+  const rightX = (i) => leftX(i) + nodeW;
+  const topY = (i) => pad + Math.floor(i / perRow) * (rowH + 20);
+  const botY = (i) => topY(i) + rowH;
+  let nodesSvg = '';
+  tables.forEach((t, i) => {
+    const fksInThis = (state.fks||[]).filter(f => (f.child_schema===schema && f.child_table===t.table_name) || (f.parent_schema===schema && f.parent_table===t.table_name));
+    const hasAnyFk = fksInThis.length > 0;
+    const x = leftX(i), y = topY(i);
+    nodesSvg += `<g class="fk-node ${hasAnyFk?'pk':''}" transform="translate(${x},${y})">`;
+    nodesSvg += `<rect width="${nodeW}" height="${rowH}" rx="5" />`;
+    nodesSvg += `<text class="label" x="${nodeW/2}" y="18" text-anchor="middle">${esc(t.table_name)}${t.has_primary_key?'':''}</text>`;
+    nodesSvg += `<line x1="10" y1="26" x2="${nodeW-10}" y2="26" stroke="#ccc" />`;
+    // Show up to 6 columns then "+ N more"
+    let colNames;
+    try { colNames = state.stack[0] && state.stack[0].schema===schema && state.stack[0].table===t.table_name ? state.stack[0].columns.map(c=>c.column_name) : []; } catch(_) { colNames = []; }
+    const pks = new Set(colNames.length ? colNames.filter((n,idx) => {
+      const c = state.stack[0].columns.find(x=>x.column_name===n); return c && c.is_primary_key;
+    }) : []);
+    // FK columns from metadata
+    const knownFkCols = new Set();
+    for (const f of state.fks||[]) {
+      if (f.child_schema===schema && f.child_table===t.table_name) (f.child_columns||[]).forEach(c=>knownFkCols.add(c));
+    }
+    let dispNames = colNames.length ? colNames : (t.cols||[]);
+    if (!dispNames.length) dispNames = knownFkCols.size ? Array.from(knownFkCols) : ['(click table to see cols)'];
+    const maxC = 6;
+    const shown = dispNames.slice(0, maxC);
+    shown.forEach((n, k) => {
+      const ispk = pks.has(n) || (k === 0 && !colNames.length && t.has_primary_key);
+      const isfk = knownFkCols.has(n);
+      const label = (ispk?'🔑 ':'') + (isfk?'➡ ':'') + n;
+      nodesSvg += `<text class="col ${ispk?'pk':''}" x="12" y="${42 + k*11}">${esc(label).slice(0,24)}</text>`;
+    });
+    if (dispNames.length > maxC) {
+      nodesSvg += `<text class="col" x="12" y="${42 + maxC*11}" fill="#999">+ ${dispNames.length-maxC} more cols…</text>`;
+    }
+    nodesSvg += `</g>`;
+  });
+  let linksSvg = '';
+  (state.fks||[]).forEach(f => {
+    if (!(f.child_schema===schema && f.parent_schema===schema)) return;
+    const cIdx = tables.findIndex(t => t.table_name === f.child_table);
+    const pIdx = tables.findIndex(t => t.table_name === f.parent_table);
+    if (cIdx < 0 || pIdx < 0) return;
+    let x1, y1, x2, y2;
+    const sameRow = Math.floor(cIdx/perRow) === Math.floor(pIdx/perRow);
+    if (cIdx < pIdx) { x1 = rightX(cIdx); y1 = centerY(cIdx); x2 = leftX(pIdx); y2 = centerY(pIdx); }
+    else { x1 = leftX(cIdx); y1 = centerY(cIdx); x2 = rightX(pIdx); y2 = centerY(pIdx); }
+    const midx = (x1+x2)/2;
+    const colPairLabel = (f.child_columns||[]).map((c,i) => `${c}=${(f.parent_columns||[])[i]}`).join(',');
+    const pathD = `M ${x1} ${y1} C ${midx} ${y1}, ${midx} ${y2}, ${x2} ${y2}`;
+    linksSvg += `<path class="fk-link" d="${pathD}" marker-end="url(#arr)" />`;
+    const midX = (x1+x2)/2, midY = (y1+y2)/2;
+    linksSvg += `<text class="fk-label" x="${midX}" y="${midY - 3}" text-anchor="middle" style="font-family:monospace;">${esc(colPairLabel).slice(0, 40)}</text>`;
+  });
+  const arrowDefs = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#95a5a6" /></marker></defs>`;
+  const body = `
+    <div class="fk-map-wrap">
+      <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">
+        ${arrowDefs}
+        ${linksSvg}
+        ${nodesSvg}
+      </svg>
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:#666;">
+      Blue-outlined nodes = participates in at least 1 FK. Arrow direction: child → parent (FK points to PK). 🔑 = PK column. ➡ = FK column.
+    </div>`;
+  showConfirm(`Schema: ${esc(schema)} — Foreign key graph`, '', {confirmText:'Close', cancelText:null}).catch(()=>{});
+  const modal = document.querySelector('.modal');
+  if (modal) {
+    modal.style.maxWidth = '95vw';
+    modal.style.width = (Math.min(1200, svgW + 80)) + 'px';
+    modal.querySelector('.modal-body').innerHTML = body;
+    const okBtn = modal.querySelector('[data-act="ok"]');
+    const cancelBtn = modal.querySelector('[data-act="cancel"]');
+    if (okBtn) okBtn.textContent = 'Close';
+    if (cancelBtn) cancelBtn.style.display = 'none';
+  }
 }
 
 /* ---------- Data refreshers ---------- */
@@ -531,6 +664,7 @@ async function initRootBrowser() {
     rows: null, total: 0, clamped: false,
     editing: null,
     searching: null,
+    orderBy: null,
     page: 0, pageSize: 100,
     error: null
   }];
@@ -549,7 +683,10 @@ async function reloadBrowserRows(stackIdx) {
       schema: entry.schema,
       table: entry.table,
       filters,
-      orderBy: entry.pkColumns.map(col=>({column:col,desc:false})),
+      search,
+      orderBy: (entry.orderBy && entry.orderBy.length)
+        ? entry.orderBy
+        : entry.pkColumns.map(col=>({column:col, desc:false})),
       limit: entry.pageSize,
       offset: entry.page * entry.pageSize
     }});
@@ -602,6 +739,7 @@ async function activateMasterRow(idx, rowIndex) {
       rows: null, total: 0, clamped: false,
       editing: null,
       searching: null,
+      orderBy: null,
       page: 0, pageSize: 100,
       error: null
     });
@@ -708,7 +846,7 @@ function renderBrowserHeader(entry, idx) {
       <button class="icon-btn success tooltip" data-act="search" data-idx="${idx}" data-tip="${entry.searching && entry.searching.active ? 'Cancel search' : 'Search table (LIKE patterns)'}">
         ${entry.searching && entry.searching.active ? '✖' : '🔍'}
       </button>
-      <button class="icon-btn primary tooltip" data-act="create" data-idx="${idx}" data-tip="Insert new row" ${(!state.txnActive || !entry.hasPk) ? 'disabled':''}>＋</button>
+      <button class="icon-btn primary tooltip" data-act="create" data-idx="${idx}" data-tip="Insert new row" ${(!entry.hasPk) ? 'disabled':''}>＋</button>
       ${!isRoot ? `
         <button class="icon-btn warn tooltip" data-act="pop" data-idx="${idx}" data-tip="Close this detail browser / pop state">⬆</button>
       ` : ``}
@@ -730,6 +868,8 @@ function renderRowsTable(entry, idx) {
   }
   const isMasterRow = (rI) => entry.masterRowIndex === rI;
   const pkSet = new Set(entry.pkColumns);
+  // Determine active sort state for column header sort-ctrl indicators
+  const activeOrder = entry.orderBy && entry.orderBy.length ? entry.orderBy[0] : null;
 
   let html = `<div class="table-wrap"><table class="data"><thead><tr>`;
   html += `<th class="col-actions-header pk-col" style="width:120px;">
@@ -749,21 +889,36 @@ function renderRowsTable(entry, idx) {
       for (const fk of col.foreign_keys) tipParts.push(`→ FK: ${fk.foreign_table_name}.${fk.foreign_column_name}`);
     }
     const tip = tipParts.join('\n');
+    // sort indicator: 3-state none asc desc. Click cycles: none → asc → desc → (pk default / none)
+    let sortClass = '';
+    let sortArrow = '⇅';
+    if (activeOrder && activeOrder.column === col.column_name) {
+      if (activeOrder.desc === false) { sortClass = 'asc'; sortArrow = '↑'; }
+      else { sortClass = 'desc'; sortArrow = '↓'; }
+    }
     html += `<th class="${isPk?'pk-col':''} tooltip" data-tip="${esc(tip)}">
-      ${esc(col.column_name)}${isPk?' 🔑':''}
-      <div class="dtype">${esc(col.data_type)}${col.is_nullable==='YES'?'?':''}</div>
+      <span class="column-name">${esc(col.column_name)}${isPk?' 🔑':''}
+        <span class="sort-ctrl ${sortClass}" data-act="sort-ctrl" data-idx="${idx}" data-col="${esc(col.column_name)}" title="Sort: click to cycle (none → asc → desc)">${sortArrow}</span>
+      </span>
     </th>`;
   }
   html += `</tr></thead><tbody>`;
 
+  // Row display filtering:
+  // - hide non-master siblings when master active
+  // - hide non-edit siblings when editing a specific row (edit form shows above anyway but clean up rows)
+  const masterActive = entry.masterRowIndex != null;
+  const editActive = entry.editing && entry.editing.mode === 'edit' && entry.editing.rowIndex != null;
   for (let rI = 0; rI < entry.rows.length; rI++) {
+    if (masterActive && rI !== entry.masterRowIndex) continue;
+    if (editActive && rI !== entry.editing.rowIndex) continue;
     const row = entry.rows[rI];
     const isLocked = isMasterRow(rI);
     html += `<tr class="${isLocked?'master-row':''}">`;
     // Actions cell
     html += `<td class="actions">
-      <button class="icon-btn primary tooltip" data-act="edit" data-idx="${idx}" data-row="${rI}" data-tip="Edit row" ${(!state.txnActive || !entry.hasPk || isLocked)?'disabled':''}>✎</button>
-      <button class="icon-btn danger tooltip" data-act="delete" data-idx="${idx}" data-row="${rI}" data-tip="Delete row" ${(!state.txnActive || !entry.hasPk || isLocked)?'disabled':''}>🗑</button>
+      <button class="icon-btn primary tooltip" data-act="edit" data-idx="${idx}" data-row="${rI}" data-tip="Edit row" ${(!entry.hasPk || isLocked)?'disabled':''}>✎</button>
+      <button class="icon-btn danger tooltip" data-act="delete" data-idx="${idx}" data-row="${rI}" data-tip="Delete row" ${(!entry.hasPk || isLocked)?'disabled':''}>🗑</button>
       <button class="icon-btn success tooltip" data-act="master" data-idx="${idx}" data-row="${rI}" data-tip="${isLocked?'Release master (has children)':'Use as master row — open detail tables below'}" ${(!entry.hasPk || (!isLocked && entry.editing))?'disabled':''} ${isLocked?'style="background:#fff3cd;border-color:#ffc107;"':''}>${isLocked?'📌':'➡'}</button>
     </td>`;
     for (const col of entry.columns) {
@@ -775,6 +930,8 @@ function renderRowsTable(entry, idx) {
   }
 
   html += `</tbody></table></div>`;
+  if (masterActive) html += `<div class="banner info" style="border-top:none;border-radius:0;">Siblings hidden while a master row is active — uncheck the master row's 📌 button to show all rows again.</div>`;
+  else if (editActive) html += `<div class="banner info" style="border-top:none;border-radius:0;">Siblings hidden during row edit — Cancel or Submit to show all rows again.</div>`;
   return html;
 }
 
@@ -829,7 +986,6 @@ function renderFormField(col, data, lockedCols, pkSet, mode) {
   const v = data[col.column_name];
   const isLocked = lockedCols.has(col.column_name);
   const isPk = pkSet.has(col.column_name);
-  // Edit mode: PK columns disabled so they can't be changed (we update by PK)
   const isPkDisabled = (mode === 'edit' && isPk);
   const disabled = isLocked || isPkDisabled;
   const type = guessInputType(col);
@@ -847,8 +1003,12 @@ function renderFormField(col, data, lockedCols, pkSet, mode) {
   if (col.column_comment) hintParts.push(col.column_comment);
   if (col.column_default && mode==='create') hintParts.push(`default: ${col.column_default}`);
   if (col.character_maximum_length) hintParts.push(`max ${col.character_maximum_length} chars`);
+  const labelTip = [
+    col.data_type + (col.udt_name && col.udt_name !== col.data_type ? ` (${col.udt_name})` : ''),
+    col.is_nullable === 'YES' ? 'nullable' : 'NOT NULL'
+  ].join('\n');
   return `<div class="form-field">
-    <label class="${isPk?'pk':''} ${isLocked?'locked':''}">
+    <label class="${isPk?'pk':''} ${isLocked?'locked':''} tooltip" data-tip="${esc(labelTip)}">
       ${esc(col.column_name)}${isPk?' 🔑':''}
     </label>
     ${input}
@@ -897,8 +1057,12 @@ function renderSearchPanel(entry, idx) {
       ${entry.columns.map(col => {
         if (lockedCols.has(col.column_name)) return '';
         const cur = (entry.searching.criteria.find(c=>c.column===col.column_name) || {}).value || '';
+        const tip = [
+          col.data_type + (col.udt_name && col.udt_name !== col.data_type ? ` (${col.udt_name})` : ''),
+          col.is_nullable === 'YES' ? 'nullable' : 'NOT NULL'
+        ].join('\n');
         return `<div class="form-field">
-          <label>${esc(col.column_name)} ILIKE</label>
+          <label class="tooltip" data-tip="${esc(tip)}">${esc(col.column_name)} ILIKE</label>
           <input type="text" data-col="${esc(col.column_name)}" value="${esc(cur)}" placeholder="%keyword%">
         </div>`;
       }).join('')}
@@ -947,7 +1111,33 @@ function attachContentHandlers() {
         await handleAction(idx, act, rowIdx, btn);
       });
     });
+    $$('thead th .sort-ctrl', card).forEach(ctrl => {
+      ctrl.addEventListener('click', async () => {
+        const idx = +ctrl.dataset.idx;
+        const col = ctrl.dataset.col;
+        cycleSort(idx, col);
+      });
+    });
   });
+}
+
+async function cycleSort(idx, colName) {
+  const entry = state.stack[idx];
+  if (!entry || !entry.columns) return;
+  const entryOrder = entry.orderBy || [];
+  const existing = entryOrder.find(o => o.column === colName);
+  let nextOrder;
+  if (!existing) {
+    nextOrder = [{ column: colName, desc: false }];
+  } else if (existing.desc === false) {
+    nextOrder = [{ column: colName, desc: true }];
+  } else {
+    nextOrder = entry.pkColumns.map(c => ({column:c, desc:false}));
+  }
+  entry.orderBy = nextOrder;
+  entry.page = 0;
+  await reloadBrowserRows(idx);
+  render();
 }
 
 async function handleAction(idx, act, rowIdx, btn) {
@@ -955,6 +1145,7 @@ async function handleAction(idx, act, rowIdx, btn) {
   try {
     if (act === 'search') { toggleSearch(idx); return; }
     if (act === 'create') {
+      if (!await ensureTxn('create row')) return;
       entry.editing = { mode: 'create', data: {} };
       entry.searching && (entry.searching.active = false);
       render(); return;
@@ -983,21 +1174,29 @@ async function handleAction(idx, act, rowIdx, btn) {
       render(); return;
     }
     if (act === 'edit') {
+      if (!await ensureTxn('edit row')) return;
       entry.editing = { mode: 'edit', data: JSON.parse(JSON.stringify(entry.rows[rowIdx])), rowIndex: rowIdx };
       render(); return;
     }
     if (act === 'delete') {
+      if (!await ensureTxn('delete row')) return;
       const row = entry.rows[rowIdx];
       const pkPreview = entry.pkColumns.map(c => `${c}=${formatVal(row[c])}`).join(', ');
       const ok = await showConfirm('Delete row?', `About to DELETE from ${entry.table}:\n  ${pkPreview}\n\nThis cannot be undone (unless you rollback an open transaction).`, {confirmText:'Delete', danger:true});
       if (!ok) return;
-      await api('/api/row', { method: 'DELETE', body: {
-        schema: entry.schema, table: entry.table,
-        pk: Object.fromEntries(entry.pkColumns.map(c => [c, row[c]])),
-        pkColumns: entry.pkColumns
-      }});
+      try {
+        await api('/api/row', { method: 'DELETE', body: {
+          schema: entry.schema, table: entry.table,
+          pk: Object.fromEntries(entry.pkColumns.map(c => [c, row[c]])),
+          pkColumns: entry.pkColumns
+        }});
+      } catch(e) {
+        if (state.txnActive) state.txnErrorPending = true;
+        render();
+        toast(e.message, 'error');
+        return;
+      }
       toast('Row deleted', 'success');
-      // Reload from idx downward (to also clear children if master row was deleted)
       for (let i = idx; i < state.stack.length; i++) await reloadBrowserRows(i);
       render(); return;
     }
@@ -1061,26 +1260,30 @@ async function submitCrud(idx) {
   const data = collectForm(panel, entry.columns);
   try {
     if (entry.editing.mode === 'create') {
-      await api('/api/row', { body: { schema: entry.schema, table: entry.table, row: data } });
+      try {
+        await api('/api/row', { body: { schema: entry.schema, table: entry.table, row: data } });
+      } catch(e) { if (state.txnActive) state.txnErrorPending = true; throw e; }
       toast('Row inserted', 'success');
     } else {
       const orig = entry.editing.data;
-      await api('/api/row', { method: 'PUT', body: {
-        schema: entry.schema, table: entry.table,
-        row: data,
-        pk: Object.fromEntries(entry.pkColumns.map(c => [c, orig[c]])),
-        pkColumns: entry.pkColumns
-      }});
+      try {
+        await api('/api/row', { method: 'PUT', body: {
+          schema: entry.schema, table: entry.table,
+          row: data,
+          pk: Object.fromEntries(entry.pkColumns.map(c => [c, orig[c]])),
+          pkColumns: entry.pkColumns
+        }});
+      } catch(e) { if (state.txnActive) state.txnErrorPending = true; throw e; }
       toast('Row updated', 'success');
     }
     entry.editing = null;
-    // Reload from idx downward
     for (let i = idx; i < state.stack.length; i++) {
       state.stack[i].page = 0;
       await reloadBrowserRows(i);
     }
     render();
   } catch (e) {
+    render();
     toast(e.message, 'error');
   }
 }

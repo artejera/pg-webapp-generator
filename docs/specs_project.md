@@ -106,14 +106,27 @@ Navigation buttons, shown in predictable locations:
 - sql-expression 
 
 <hr/><hr/><hr/><br/>
-# NEXT
+
+# DONE 2026-10-03
 - Can we Show HotX version in connection dialog
 - Can we check the posibility of setting 'TXN' state automatically if a 'create/modify/delete' button is ever pressed.
 - Can we activate automatically the 'rollback' button if we ever get a postgres error, which would, anyway, destroy the current TXN?
 - Please: when a table row in a browser is marked as 'master table row', and the 'detail table' browser is being shown, then please hide the un-selected sibling rows of the 'master table'. Show again the siblings when the 'master table row' is unmarked.
-- Please: when the form with a row selected for edition is shown, please hide the other unselected sibling rows.
+- Please: when the form with a row selected for edition is shown, please show the edit form and hide its table browser.
 - Please: in a form, and in a browser, in the column labels, please remove the data-type info and present them as tooltips.
 - Please: create another icon-button in the web page header with would show a map of the foreign-key relations between the tables of the selected schema, in a popup window, in a simple graphical form.
+- Please: can you upgrade the header items of the table browser, adding a multi-state icon-control, so that they represent the 'sort' state of the column: none, ascending, descending ? And , of course, when the user clicks on the control, the table browser is sorted accordingly.
 
-## Problem vbox stuck:
+# DONE 2026-10-03 Problem vbox stuck:
 Your last version seems great, really, i'm making my list of fixes, really minor. However, i tested it with a really large table, about 29000 rows and some blobs in, and ... my whole vbox VM (with 16gb,debian), got stuck and i had to restart it ... also, the postgres server indicated a stale open connection, without transaction, performing a pg_cancel_backend()
+
+# NEXT 2026-10-04B:
+- In those cases where it was asked to 'hide' all browsed rows, where the UI shows the message "Siblings hidden during row edit — Cancel or Submit to show all rows again.", PLEASE hide the browser complete, don't show any messages.
+- These requests were made before and were not met:
+  - Can we Show HotX version in connection dialog
+  . Can you show the field's data-type tooltip in the table browser headers, as you already do in the form labels?
+## NEXT - fk diagram
+- Please: Can you make more space for the labels of the arrows of the foreign-key relations diagram ?
+- Please: Can you make sure that the labels are not truncated, and that they are readable 
+  - The arrow's labels are are the most important information to display in this diagram.
+- Please: that some of the squares in the diagram contain the list of fields of the table, and some others don't
