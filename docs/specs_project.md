@@ -107,5 +107,13 @@ Navigation buttons, shown in predictable locations:
 
 <hr/><hr/><hr/><br/>
 # NEXT
-- Show HotX version in connection dialog
-- Think on the posibility of setting 'TXN' state automatically if a 'create/modify/delete' button is ever pressed.
+- Can we Show HotX version in connection dialog
+- Can we check the posibility of setting 'TXN' state automatically if a 'create/modify/delete' button is ever pressed.
+- Can we activate automatically the 'rollback' button if we ever get a postgres error, which would, anyway, destroy the current TXN?
+- Please: when a table row in a browser is marked as 'master table row', and the 'detail table' browser is being shown, then please hide the un-selected sibling rows of the 'master table'. Show again the siblings when the 'master table row' is unmarked.
+- Please: when the form with a row selected for edition is shown, please hide the other unselected sibling rows.
+- Please: in a form, and in a browser, in the column labels, please remove the data-type info and present them as tooltips.
+- Please: create another icon-button in the web page header with would show a map of the foreign-key relations between the tables of the selected schema, in a popup window, in a simple graphical form.
+
+## Problem vbox stuck:
+Your last version seems great, really, i'm making my list of fixes, really minor. However, i tested it with a really large table, about 29000 rows and some blobs in, and ... my whole vbox VM (with 16gb,debian), got stuck and i had to restart it ... also, the postgres server indicated a stale open connection, without transaction, performing a pg_cancel_backend()

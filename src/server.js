@@ -5,6 +5,32 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
+// #region debug-point global:dbg-helper
+const __DBG_ENV_PATH = '.dbg/large-table-oom.env';
+const __DBG = (() => {
+  let _u = 'http://127.0.0.1:7777/event', _s = 'large-table-oom';
+  try {
+    const e = fs.readFileSync(__DBG_ENV_PATH, 'utf8');
+    _u = (e.match(/DEBUG_SERVER_URL=(.+)/) || [])[1] || _u;
+    _s = (e.match(/DEBUG_SESSION_ID=(.+)/) || [])[1] || _s;
+  } catch(e) {}
+  let _seq = 0;
+  return (hypothesisId, location, msg, data = {}, runId = 'pre-fix') => {
+    try {
+      const body = JSON.stringify({
+        sessionId: _s, runId, hypothesisId, location,
+        msg: '[DEBUG] ' + msg,
+        data: Object.assign({ seq: ++_seq, pid: process.pid, rssMB: Math.round(process.memoryUsage().rss/1048576), heapMB: Math.round(process.memoryUsage().heapUsed/1048576) }, data),
+        ts: Date.now()
+      });
+      const req = require('http').request(_u, { method: 'POST', headers: { 'Content-Type':'application/json', 'Content-Length': Buffer.byteLength(body) } });
+      req.on('error', ()=>{});
+      req.write(body); req.end();
+    } catch(e) {}
+  };
+})();
+// #endregion
+
 const VERSION = (() => {
   const d = new Date();
   const pad = (n, w=2) => String(n).padStart(w, '0');
@@ -46,24 +72,91 @@ async function getClient(sessionId) {
 }
 
 async function runQuery(sessionId, sql, params = [], opts = {}) {
-  const client = await getClient(sessionId);
+  const __dbg_trace = { sqlLen: sql.length, paramsLen: params.length, opts: JSON.stringify(opts), sidShort: sessionId ? sessionId.slice(0,8) : null };
+  // #region debug-point A:runquery-entry
+  __DBG('A', 'server.js:runquery-enter', 'runQuery called', Object.assign({}, __dbg_trace, { enforceLimit: opts.enforceLimit !== false }));
+  // #endregion
+  // --- FIX 0: do not acquire a fresh pooled client if we are inside an active TXN (we'd hold
+  //     a wasted borrowed client for the whole query, reducing pool capacity).
+  const txn = txnMap.get(sessionId);
+  let ownClient = null;
+  let qp;
+  if (txn) {
+    qp = txn.client;
+  } else {
+    ownClient = await getClient(sessionId);
+    qp = ownClient;
+  }
+  const client = qp; // alias for final instrumentation compatibility
+  // #region debug-point A:runquery-client-acquired
+  const __dbg_clientSerial = (client.__dbg_serial = client.__dbg_serial || Math.random().toString(36).slice(2,10));
+  __DBG('A', 'server.js:runquery-client-acq', 'qp set', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, txnActive: !!txn, acquiredOwnClient: !!ownClient }));
+  // #endregion
   let timer;
+  let __dbg_timeoutFired = false;
+  let __dbg_cancelDone = false;
+  let backendPid = null;
+  try {
+    const pr = await qp.query('SELECT pg_backend_pid() AS pid');
+    backendPid = pr.rows[0].pid;
+    // #region debug-point E:backend-pid
+    __DBG('E', 'server.js:backend-pid', 'Captured backend PID before main query', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, backendPid }));
+    // #endregion
+  } catch(e) {
+    // #region debug-point E:backend-pid-err
+    __DBG('E', 'server.js:backend-pid-err', 'Failed to read pg_backend_pid()', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, pidErr: (e.message||'').slice(0,120) }));
+    // #endregion
+  }
   try {
     const timeout = opts.timeout ?? QUERY_TIMEOUT_MS;
     const useLimit = opts.enforceLimit !== false;
-    const txn = txnMap.get(sessionId);
-    const qp = txn ? txn.client : client;
     timer = setTimeout(() => {
-      try { qp.query('SELECT pg_cancel_backend(pg_backend_pid())').catch(()=>{}); } catch(e){}
+      __dbg_timeoutFired = true;
+      // #region debug-point A:timeout-fire
+      __DBG('A', 'server.js:timeout-fired', 'QUERY TIMEOUT FIRED — about to call pg_cancel_backend via NEW pool client', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, afterMs: timeout, backendPid }));
+      // #endregion
+      (async () => {
+        let cancelClient = null;
+        try {
+          cancelClient = await getPool(sessionId).connect();
+          const r = await cancelClient.query({ text: 'SELECT pg_cancel_backend($1) AS ok', values: [backendPid] });
+          // #region debug-point E:cancel-resolved
+          __dbg_cancelDone = 'ok via separate client pid=' + backendPid + ' result=' + JSON.stringify(r.rows && r.rows[0]);
+          __DBG('E', 'server.js:cancel-resolved', 'pg_cancel_backend on SEPARATE client RESOLVED', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, backendPid, cancelResult: r.rows && r.rows[0], backendPidSeparateClient: !!cancelClient }));
+          // #endregion
+        } catch(e) {
+          // #region debug-point E:cancel-rejected
+          __dbg_cancelDone = 'err:' + (e.message||'').slice(0,80);
+          __DBG('E', 'server.js:cancel-rejected', 'pg_cancel_backend via separate client REJECTED', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, cancelErr: (e.message||'').slice(0,100), backendPid }));
+          // #endregion
+        } finally {
+          if (cancelClient) { try { cancelClient.release(true); } catch(_) {} }
+        }
+      })().catch(() => {});
     }, timeout);
     let finalSql = sql;
     let finalParams = params;
     if (useLimit && /^\s*select\s/i.test(sql)) {
       if (!/\blimit\s+/i.test(sql)) {
         finalSql = sql + ` LIMIT ${MAX_ROWS + 1}`;
+        // #region debug-point B:limit-appended
+        __DBG('B', 'server.js:limit-appended', 'Appended MAX_ROWS+1 LIMIT clause to SELECT', Object.assign({}, __dbg_trace, { finalSql: finalSql.slice(0,160), wasAlReady: false }));
+        // #endregion
+      } else {
+        // #region debug-point B:limit-already
+        __DBG('B', 'server.js:limit-already', 'SELECT already has LIMIT — leaving untouched', Object.assign({}, __dbg_trace, { finalSql: finalSql.slice(0,160) }));
+        // #endregion
       }
     }
+    // #region debug-point C:query-start (memory pre)
+    const __dbg_memStart = process.memoryUsage();
+    __DBG('C', 'server.js:query-start', 'qp.query(await) ABOUT TO AWAIT', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, sql: finalSql.slice(0,200), paramsLen: finalParams.length, rssStartMB: Math.round(__dbg_memStart.rss/1048576), heapStartMB: Math.round(__dbg_memStart.heapUsed/1048576) }));
+    // #endregion
     const res = await qp.query({ text: finalSql, values: finalParams });
+    // #region debug-point C:query-resolved (memory post)
+    const __dbg_memAfter = process.memoryUsage();
+    __DBG('C', 'server.js:query-ok', 'qp.query AWAIT RESOLVED rows OK', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, rowsCount: res.rows.length, fieldsCount: (res.fields||[]).length, rssDeltaMB: Math.round((__dbg_memAfter.rss-__dbg_memStart.rss)/1048576), heapDeltaMB: Math.round((__dbg_memAfter.heapUsed-__dbg_memStart.heapUsed)/1048576), timeoutFired: __dbg_timeoutFired }));
+    // #endregion
     clearTimeout(timer);
     timer = null;
     let rows = res.rows;
@@ -72,10 +165,34 @@ async function runQuery(sessionId, sql, params = [], opts = {}) {
       rows = rows.slice(0, MAX_ROWS);
       clamped = true;
     }
+    // #region debug-point D:release-about
+    __DBG('D', 'server.js:release-about', 'success path before release', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, clamped, returningRows: rows.length, cancelResultState: __dbg_cancelDone }));
+    // #endregion
     return { rows, fields: res.fields, rowCount: res.rowCount, clamped };
+  } catch (e) {
+    // #region debug-point A:query-threw
+    __DBG('A', 'server.js:query-threw', 'qp.query THREW (may be timeout-cancel error)', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, errClass: e.constructor.name, errMsg: (e.message||'').slice(0,160), timeoutFired: __dbg_timeoutFired, cancelResultState: __dbg_cancelDone }));
+    // #endregion
+    throw e;
   } finally {
     if (timer) clearTimeout(timer);
-    try { client.release(); } catch(e){}
+    // #region debug-point D:release-finally
+    try {
+      if (!txn && ownClient) {
+        // Only release borrowed pooled clients, NEVER a TXN's reserved client.
+        if (__dbg_timeoutFired) {
+          try { ownClient.release(true); __DBG('D', 'server.js:release-finally-force-destroy', 'ownClient.release(true) FORCE DROP (cancel path, pooled client)', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, timeoutFired: __dbg_timeoutFired, cancelResultState: __dbg_cancelDone })); }
+          catch(e) { __DBG('D', 'server.js:release-finally-err', 'force-drop release threw', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, releaseErr: (e.message||'').slice(0,100) })); }
+        } else {
+          ownClient.release(); __DBG('D', 'server.js:release-finally-ok', 'ownClient.release() SUCCESS (normal pooled)', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, timeoutFired: __dbg_timeoutFired, cancelResultState: __dbg_cancelDone }));
+        }
+      } else if (txn) {
+        __DBG('D', 'server.js:release-finally-skip-txn', 'Skip release — inside active TXN (txn.client lifecycle belongs to txn map)', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial }));
+      }
+    } catch(e) {
+      __DBG('D', 'server.js:release-finally-err', 'finally release THREW (outer)', Object.assign({}, __dbg_trace, { clientSerial: __dbg_clientSerial, releaseErr: (e.message||'').slice(0,100) }));
+    }
+    // #endregion
   }
 }
 
@@ -110,6 +227,11 @@ app.post('/api/login', async (req, res) => {
     client.release();
     const sessionId = newSessionId();
     poolMap.set(sessionId, { pool, creds: { user, host, port: Number(port), database } });
+    // #region debug-point D:pool-created
+    pool.on('acquire', (c) => { __DBG('D', 'server.js:pool-acquire', 'Pool client ACQUIRED event', { sidShort: sessionId.slice(0,8), poolTotalCount: pool.totalCount, poolIdleCount: pool.idleCount, poolWaitingCount: pool.waitingCount }); });
+    pool.on('release', (c) => { __DBG('D', 'server.js:pool-release', 'Pool client RELEASED event', { sidShort: sessionId.slice(0,8), poolTotalCount: pool.totalCount, poolIdleCount: pool.idleCount, poolWaitingCount: pool.waitingCount }); });
+    __DBG('D', 'server.js:login-pool-created', 'Login success: session + pool created', { sidShort: sessionId.slice(0,8), user, host, port: Number(port), database, poolMax: 4, rssMB: Math.round(process.memoryUsage().rss/1048576) });
+    // #endregion
     ok(res, { sessionId, user, host, port: Number(port), database });
   } catch (e) { err(res, e, 401); }
 });
@@ -330,6 +452,11 @@ function buildWhere(filters, startIdx = 1) {
 }
 
 app.post('/api/rows', async (req, res) => {
+  // #region debug-point C:rows-entry
+  const __rows_start_mem = process.memoryUsage();
+  const __rows_body_bytes = Buffer.byteLength(JSON.stringify(req.body||{}));
+  __DBG('C', 'server.js:rows-entry', '/api/rows called', { sidShort: req.sessionId ? req.sessionId.slice(0,8) : null, schema: req.body && req.body.schema, table: req.body && req.body.table, limit: req.body && req.body.limit, offset: req.body && req.body.offset, filtersLen: req.body && (req.body.filters||[]).length, searchLen: req.body && (req.body.search||[]).length, bodyBytes: __rows_body_bytes, rssStartMB: Math.round(__rows_start_mem.rss/1048576) });
+  // #endregion
   try {
     const { schema = 'public', table, filters = [], search = [], orderBy, limit, offset } = req.body;
     if (!table) throw new Error('table required');
@@ -349,17 +476,73 @@ app.post('/api/rows', async (req, res) => {
     const params = [...w1.params, ...w2.params];
     const sql = `SELECT * FROM ${qIdent(schema)}.${qIdent(table)}${where}${orderSql}${limitSql}`;
     const countSql = `SELECT count(*)::bigint AS total FROM ${qIdent(schema)}.${qIdent(table)}${where}`;
-    const [data, countRes] = await Promise.all([
-      runQuery(req.sessionId, sql, params),
-      runQuery(req.sessionId, countSql, params, { enforceLimit: false })
-    ]);
-    ok(res, {
+    // #region debug-point C:rows-sql-preview
+    __DBG('C', 'server.js:rows-sql', '/api/rows final SQL before runQuery calls', { sql: sql.slice(0,200), countSql: countSql.slice(0,200), paramsLen: params.length, hasExplicitLimit: !!limitSql, runQueryLimitWillAppend: !limitSql });
+    // #endregion
+    // --- FIX 4: SEQUENTIAL execution, never parallel. Running rows + count Promise.all doubled
+    //     peak resource usage on large tables (ORDER BY sort detoast + count heap scan concurrently).
+    //     Always run rows FIRST (smaller, LIMIT pageSize bound). Then run count with fallback:
+    //     reltuples fast estimate → exact count(*) fallback if <50k rows or any filters present.
+    let total = 0;
+    let countError = null;
+    // Step 1: always rows query first — small, bounded by LIMIT 100/250/500
+    const data = await runQuery(req.sessionId, sql, params);
+    // Step 2: now count, no concurrent work with rows
+    try {
+      const noFilters = w1.params.length === 0 && w2.params.length === 0;
+      if (noFilters) {
+        try {
+          // pg_class.reltuples: cost = 0 ms catalog lookup (no heap scan)
+          const est = await runQuery(req.sessionId, `
+            SELECT c.reltuples::bigint AS estimate,
+                   c.reltuples < 50000 AS small_enough_for_exact
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = $2
+          `, [schema, table], { enforceLimit: false });
+          const row = est.rows[0];
+          if (row && row.small_enough_for_exact) {
+            const cRes = await runQuery(req.sessionId, countSql, params, { enforceLimit: false });
+            total = cRes.rows[0] ? Number(cRes.rows[0].total) : 0;
+          } else if (row) {
+            // large table: use estimate, no full count(*) → instant, saves reading 29,000 blob pages
+            total = Math.max(0, Number(row.estimate));
+          } else {
+            const cRes = await runQuery(req.sessionId, countSql, params, { enforceLimit: false });
+            total = cRes.rows[0] ? Number(cRes.rows[0].total) : 0;
+          }
+        } catch(e) {
+          countError = 'estimate_failed: ' + (e.message||'').slice(0,80);
+          const cRes = await runQuery(req.sessionId, countSql, params, { enforceLimit: false });
+          total = cRes.rows[0] ? Number(cRes.rows[0].total) : 0;
+        }
+      } else {
+        // Filters active: estimate is wrong — must run actual count(*)
+        const cRes = await runQuery(req.sessionId, countSql, params, { enforceLimit: false });
+        total = cRes.rows[0] ? Number(cRes.rows[0].total) : 0;
+      }
+    } catch(e) {
+      countError = 'count_error: ' + (e.message||'').slice(0,80);
+    }
+    const responsePayload = {
       rows: data.rows,
       fields: data.fields,
-      total: countRes.rows[0] ? Number(countRes.rows[0].total) : 0,
+      total,
       clamped: data.clamped
-    });
-  } catch (e) { err(res, e); }
+    };
+    // #region debug-point C:rows-ok
+    const __rows_end_mem = process.memoryUsage();
+    const __resp_bytes = Buffer.byteLength(JSON.stringify(responsePayload));
+    __DBG('C', 'server.js:rows-ok', '/api/rows response ready (rows-then-count SEQUENTIAL + estimate fallback)', { rowsCount: data.rows.length, total, clamped: data.clamped, respBytesKB: Math.round(__resp_bytes/1024), rssDeltaMB: Math.round((__rows_end_mem.rss - __rows_start_mem.rss)/1048576), heapDeltaMB: Math.round((__rows_end_mem.heapUsed-__rows_start_mem.heapUsed)/1048576), countError });
+    // #endregion
+    ok(res, responsePayload);
+  } catch (e) {
+    // #region debug-point C:rows-err
+    const __rows_end_mem = process.memoryUsage();
+    __DBG('C', 'server.js:rows-err', '/api/rows error response', { errMsg: (e.message||'').slice(0,160), rssDeltaMB: Math.round((__rows_end_mem.rss-__rows_start_mem.rss)/1048576) });
+    // #endregion
+    err(res, e);
+  }
 });
 
 function getPkColumns(columnsMeta) {
