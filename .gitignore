@@ -1,4 +1,5 @@
 .dbg
+debug-*md
 .DS_Store
 .env
 .env.*
