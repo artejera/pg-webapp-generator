@@ -164,15 +164,22 @@ table.data .null-val { color: #bbb; font-style: italic; }
 .empty.large .emoji { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
 
 /* ---------- FK RELATIONS MAP (inline SVG popup, no CDN / external libs) ---------- */
-.fk-map-wrap { max-height: 75vh; overflow: auto; }
-.fk-map-wrap svg { display: block; background: #fafbfc; border: 1px solid #e8e8f0; border-radius: 6px; }
-.fk-map-wrap .fk-node rect { fill: #fff; stroke: #4A154B; stroke-width: 1.5; }
-.fk-map-wrap .fk-node.pk rect { fill: #d6eaf8; stroke: #2874a6; }
-.fk-map-wrap .fk-node text.label { font-size: 11px; font-weight: 700; fill: #2c3e50; }
-.fk-map-wrap .fk-node text.col { font-size: 9px; fill: #555; }
-.fk-map-wrap .fk-node text.col.pk { fill: #2874a6; font-weight: 700; }
-.fk-map-wrap .fk-link { fill: none; stroke: #95a5a6; stroke-width: 1.2; }
-.fk-map-wrap .fk-label { font-size: 11px; fill: #2c3e50; font-family: monospace; paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }
+.er-list-wrap { max-height: 72vh; overflow: auto; border: 1px solid #e8e8f0; border-radius: 6px; }
+.er-list-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.er-list-wrap th, .er-list-wrap td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid #ececf5; }
+.er-list-wrap th { background: #f3f5fb; position: sticky; top: 0; z-index: 2; font-weight: 600; color: #2c3e50; border-right: 1px solid #ececf5; }
+.er-list-wrap th:last-child { border-right: none; }
+.er-list-wrap td:first-child { font-family: monospace; font-weight: 700; color: #2874a6; white-space: nowrap; }
+.er-list-wrap td.pk-col { color: #444; }
+.er-list-wrap td.ref-col { color: #333; }
+.er-list-wrap ul { margin: 0; padding-left: 18px; line-height: 1.55; }
+.er-list-wrap ul li { margin: 2px 0; }
+.er-list-wrap .pk-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; background: #d6eaf8; color: #2874a6; font-size: 11px; font-weight: 700; margin: 1px 3px 1px 0; font-family: monospace; }
+.er-list-wrap .ref-table { font-weight: 700; color: #6c3483; font-family: monospace; }
+.er-list-wrap .marker { margin-left: 6px; font-weight: 700; }
+.er-list-wrap .marker.inv-fk { color: #16a085; }
+.er-list-wrap .marker.no-inv { color: #95a5a6; }
+.er-list-wrap .none { color: #999; font-style: italic; }
 </style>
 </head>
 <body>
@@ -396,7 +403,7 @@ function renderHeader() {
            <button class="btn-rollback${rollbackErrorClass}" data-txn="rollback" title="${state.txnErrorPending?'Postgres error detected — transaction must be rolled back.':'Rollback uncommitted changes'}">Rollback${state.txnErrorPending?' ⚠':''}</button>`
         : `<button class="btn-begin" data-txn="begin">Begin TXN</button>`}
     </div>
-    <button class="icon-btn" id="hdr-fkmap" title="Show FK relations (schema graph)" ${!state.currentSchema?'disabled':''} style="background:white;border:1px solid #ddd;">🔗</button>
+    <button class="icon-btn" id="hdr-fkmap" title="Show Entity-Relationship listing (database-wide)" ${!state.creds?'disabled':''} style="background:white;border:1px solid #ddd;">📋 ER</button>
     <button class="btn-logout" id="hdr-logout">Logout</button>
     <div class="ver">v${esc(state.version||'')}</div>
   </div>`;
@@ -438,7 +445,7 @@ function attachHeaderHandlers() {
     render();
   };
   $('#hdr-logout').onclick = doLogout;
-  $('#hdr-fkmap').onclick = () => showFkMapPopup();
+  $('#hdr-fkmap').onclick = () => showErListing();
   $$('#txn-ctrls [data-txn]').forEach(b => b.onclick = async () => {
     const act = b.dataset.txn;
     let deferredToast = null;
@@ -501,117 +508,130 @@ async function ensureTxn(forAction='write operation') {
   }
 }
 
-async function showFkMapPopup() {
-  const schema = state.currentSchema;
-  if (!schema) { toast('Select a schema first', 'warn'); return; }
-  const tables = state.tables.slice().sort((a,b)=>a.table_name.localeCompare(b.table_name));
-  if (!tables.length) { toast('No tables in schema', 'warn'); return; }
-  let allColsByTable = {};
+async function showErListing() {
+  if (!state.creds) { toast('Log in first', 'warn'); return; }
   try {
-    const r = await api('/api/columns', { query: { schema } });
-    allColsByTable = (r && r.byTable) ? r.byTable : {};
+    const data = await api('/api/er-model');
+    const rows = (data && data.tables) ? data.tables : [];
+    const key = t => `${t.schema_name}.${t.table_name}`;
+    rows.sort((a,b) => key(a).localeCompare(key(b)));
+    const rowByKey = new Map(rows.map(t => [key(t), t]));
+
+    function coversPk(childColNames, pkCols) {
+      if (!pkCols || !pkCols.length) return false;
+      const set = new Set((childColNames||[]).map(String));
+      return pkCols.every(pk => set.has(String(pk)));
+    }
+
+    // refsByParent[parentKey] = array of { childKey, f } where CHILD FK covers PARENT's full PK by name
+    const refsByParent = new Map();
+    // refsByChild[childKey]   = array of { parentKey, f } where CHILD FK covers PARENT's full PK by name
+    const refsByChild  = new Map();
+    for (const f of data.foreign_keys||[]) {
+      const childKey  = `${f.child_schema}.${f.child_table}`;
+      const parentKey = `${f.parent_schema}.${f.parent_table}`;
+      const parentRow = rowByKey.get(parentKey);
+      const pkCols    = (parentRow && parentRow.pk_columns) || [];
+      if (!coversPk(f.child_columns, pkCols)) continue;
+      if (!refsByParent.has(parentKey)) refsByParent.set(parentKey, []);
+      refsByParent.get(parentKey).push({ childKey, f });
+      if (!refsByChild.has(childKey))   refsByChild.set(childKey, []);
+      refsByChild.get(childKey).push({ parentKey, f });
+    }
+
+    // Helper: build marker for a specific directional relationship
+    // For an edge (A → B via FK) — hasInverse = FK (B → A) exists ALSO covering A's full PK by column name
+    // (symmetrical per L146 + L149 rule: "marker indicating if this relationship has an inverse reference supported by a foreign-key")
+    function inverseMarker(fromKey, toKey) {
+      const toRow = rowByKey.get(toKey);
+      const toPk  = (toRow && toRow.pk_columns) || [];
+      if (!toPk.length) return `<span class="marker no-inv" title="Destination table has no PK, so no inverse FK possible">— no dest PK</span>`;
+      let hasInverse = false;
+      const out = refsByChild.get(toKey) || [];
+      for (const r of out) {
+        if (r.parentKey === fromKey) continue; // skip the exact FK we're currently on, sibling different FK OK
+      }
+      const incomingTo = refsByParent.get(fromKey) || []; // FKs that target "fromKey" = candidates for inverse (destination->origin)
+      for (const r of incomingTo) {
+        if (r.childKey === toKey) { hasInverse = true; break; }
+      }
+      return hasInverse
+        ? `<span class="marker inv-fk" title="Inverse FK exists: ${esc(toKey)} references ${esc(fromKey)} full PK by name">⇄ inv</span>`
+        : `<span class="marker no-inv" title="No inverse FK: ${esc(toKey)} does NOT reference ${esc(fromKey)} full PK by name">• fk only</span>`;
+    }
+
+    function renderRefs(arr, titleText, emptyText, fromSide /* 'child' means FROM child: we list PARENTS (so inverse=parents->childCheck); 'parent' means FROM parent: we list CHILDREN so inverse=child->parentCheck */, edgeKeyOf) {
+      if (!arr || !arr.length) return `<span class="none">— ${esc(emptyText)}</span>`;
+      return '<ul>' + arr.map(r => {
+        const other = edgeKeyOf(r);
+        // From THIS table's POV:
+        //   (when we're listing refsByChild entries = outgoing FKs from current table = current is child):
+        //      relationship = THIS(current/child) -> r.parentKey (destination/parent)
+        //      inverse      = does destination have FK back to current covering current PK?
+        //   (when we're listing refsByParent entries = incoming FKs to current = current is parent):
+        //      relationship = r.childKey (source/child) -> THIS(current/parent)
+        //      inverse      = does destination (child) have FK from current TO it covering child's PK?
+        let fromK, toK;
+        if (fromSide === 'child') { fromK = currentTableKey; toK = other; } // outgoing
+        else                       { fromK = other; toK = currentTableKey; } // incoming (child → parent/this)
+        const m = inverseMarker(fromK, toK);
+        const colMap = (r.f.child_columns||[]).map((cc, i) => `${cc}=${(r.f.parent_columns||[])[i]||'?'}`).join(', ');
+        return `<li><span class="ref-table">${esc(other)}</span> <small style="color:#555;">(${esc(colMap)})</small>${m}</li>`;
+      }).join('') + '</ul>';
+    }
+
+    let tableRows = '';
+    let currentTableKey = null;
+    for (const t of rows) {
+      const tKey = key(t);
+      currentTableKey = tKey;
+      const pkCols = t.pk_columns||[];
+      const outRefs = refsByChild.get(tKey)  || [];  // THIS table references (outgoing FKs → parent tables)
+      const inRefs  = refsByParent.get(tKey) || [];  // Other tables reference THIS (incoming FKs ← child tables)
+      let pkHtml = '';
+      if (!pkCols.length) pkHtml = `<span class="none">— (no primary key)</span>`;
+      else                pkHtml = pkCols.map(c => `<span class="pk-badge">${esc(c)}</span>`).join('');
+      const refsOutHtml = renderRefs(outRefs, 'out', '(no referenced tables)', 'child',  r => r.parentKey);
+      const refsInHtml  = renderRefs(inRefs,  'in',  '(no referencing tables)',  'parent', r => r.childKey);
+      tableRows += `<tr><td>${esc(tKey)}</td><td class="pk-col">${pkHtml}</td><td class="ref-col">${refsOutHtml}</td><td class="ref-col">${refsInHtml}</td></tr>`;
+    }
+
+    const headerHtml = `
+      <tr>
+        <th style="width:18%;">Table (schema.name)</th>
+        <th style="width:18%;">Primary keys</th>
+        <th style="width:32%;">Tables referenced by this one (outgoing FKs)</th>
+        <th>Tables referencing this one (incoming FKs)</th>
+      </tr>
+    `;
+    const legend = `
+      <div style="margin-top:12px;font-size:12px;color:#444;line-height:1.55;">
+        <div><strong>Legend:</strong> Lists every table in database, ordered by <code>schema.table</code>. A table row is included in the "referenced" or "referenced-by" list only if its FK columns (by exact name) cover the other table's full primary key.</div>
+        <div><span class="marker inv-fk">⇄ inv</span> = the inverse relationship is also present (there is an FK going the opposite direction that covers the destination's full primary key by column name). <span class="marker no-inv">• fk only</span> = no such inverse FK.</div>
+        <div><span class="pk-badge">pk_col</span> = primary key column badge; ordered by PK ordinal (ascending). Column mapping: <code>child_column = parent_column</code> for each FK pair.</div>
+      </div>`;
+    const body = `
+      <div class="er-list-wrap">
+        <table>
+          <thead>${headerHtml}</thead>
+          <tbody>${tableRows || `<tr><td colspan="4" style="padding:30px;text-align:center;color:#888;">No tables</td></tr>`}</tbody>
+        </table>
+      </div>
+      ${legend}`;
+    showConfirm('Entity-Relationship listing (database-wide)', '', {confirmText:'Close', cancelText:null}).catch(()=>{});
+    const modal = document.querySelector('.modal');
+    if (modal) {
+      modal.style.maxWidth = '98vw';
+      modal.style.width = '1700px';
+      modal.querySelector('.modal-body').innerHTML = body;
+      const okBtn = modal.querySelector('[data-act="ok"]');
+      const cancelBtn = modal.querySelector('[data-act="cancel"]');
+      if (okBtn) okBtn.textContent = 'Close';
+      if (cancelBtn) cancelBtn.style.display = 'none';
+    }
   } catch(e) {
-    allColsByTable = {};
-  }
-  const tblByName = new Map(tables.map(t => [t.table_name, Object.assign({}, t, {
-    _cols: (allColsByTable[t.table_name]||[]).map(c=>c.column_name),
-    _pkSet: new Set((allColsByTable[t.table_name]||[]).filter(c=>c.is_primary_key).map(c=>c.column_name))
-  })]));
-  const nodeW = 280;
-  const perRow = Math.max(2, Math.min(4, Math.ceil(Math.sqrt(tables.length))));
-  const maxColsShown = 12;
-  const extraRowPerCol = 13;
-  const headerH = 34;
-  const baseH = headerH + 28;
-  const rowH = Math.max(200, baseH + maxColsShown * extraRowPerCol);
-  const pad = 60;
-  const gapX = 80;
-  const gapY = 60;
-  const rows = Math.ceil(tables.length / perRow);
-  const svgW = pad*2 + perRow*nodeW + (perRow-1)*gapX;
-  const svgH = pad*2 + rows*rowH + (rows-1)*gapY;
-  const centerX = (i) => pad + (i % perRow) * (nodeW + gapX) + nodeW/2;
-  const centerY = (i) => pad + Math.floor(i / perRow) * (rowH + gapY) + rowH/2;
-  const leftX = (i) => pad + (i % perRow) * (nodeW + gapX);
-  const rightX = (i) => leftX(i) + nodeW;
-  const topY = (i) => pad + Math.floor(i / perRow) * (rowH + gapY);
-  const botY = (i) => topY(i) + rowH;
-  let nodesSvg = '';
-  tables.forEach((t, i) => {
-    const meta = tblByName.get(t.table_name) || t;
-    const fksInThis = (state.fks||[]).filter(f => (f.child_schema===schema && f.child_table===t.table_name) || (f.parent_schema===schema && f.parent_table===t.table_name));
-    const hasAnyFk = fksInThis.length > 0;
-    const x = leftX(i), y = topY(i);
-    nodesSvg += `<g class="fk-node ${hasAnyFk?'pk':''}" transform="translate(${x},${y})">`;
-    nodesSvg += `<rect width="${nodeW}" height="${rowH}" rx="6" />`;
-    nodesSvg += `<text class="label" x="${nodeW/2}" y="20" text-anchor="middle">${esc(t.table_name)}${t.has_primary_key?' 🔑':''}</text>`;
-    nodesSvg += `<line x1="10" y1="30" x2="${nodeW-10}" y2="30" stroke="#ccc" />`;
-    let colNames = (meta._cols && meta._cols.length) ? meta._cols : [];
-    const pks = (meta._pkSet && meta._pkSet.size) ? meta._pkSet : new Set();
-    const knownFkCols = new Set();
-    for (const f of state.fks||[]) {
-      if (f.child_schema===schema && f.child_table===t.table_name) (f.child_columns||[]).forEach(c=>knownFkCols.add(c));
-    }
-    if (!colNames.length) colNames = knownFkCols.size ? Array.from(knownFkCols) : ['(columns unavailable)'];
-    const shown = colNames.slice(0, maxColsShown);
-    shown.forEach((n, k) => {
-      const ispk = pks.has(n);
-      const isfk = knownFkCols.has(n);
-      const prefix = (ispk?'🔑 ':'') + (isfk?'➡ ':'');
-      const label = prefix + n;
-      const maxChars = Math.floor((nodeW - 24) / 6.8);
-      const clipped = label.length > maxChars ? (label.slice(0, maxChars-2) + '…') : label;
-      nodesSvg += `<text class="col ${ispk?'pk':''}" x="12" y="${headerH + k*extraRowPerCol}">${esc(clipped)}</text>`;
-    });
-    if (colNames.length > maxColsShown) {
-      nodesSvg += `<text class="col" x="12" y="${headerH + maxColsShown*extraRowPerCol}" fill="#999">+ ${colNames.length-maxColsShown} more columns…</text>`;
-    }
-    nodesSvg += `</g>`;
-  });
-  let linksSvg = '';
-  let labelSvg = '';
-  (state.fks||[]).forEach(f => {
-    if (!(f.child_schema===schema && f.parent_schema===schema)) return;
-    const cIdx = tables.findIndex(t => t.table_name === f.child_table);
-    const pIdx = tables.findIndex(t => t.table_name === f.parent_table);
-    if (cIdx < 0 || pIdx < 0) return;
-    let x1, y1, x2, y2;
-    const sameRow = Math.floor(cIdx/perRow) === Math.floor(pIdx/perRow);
-    if (cIdx < pIdx) { x1 = rightX(cIdx); y1 = centerY(cIdx); x2 = leftX(pIdx); y2 = centerY(pIdx); }
-    else { x1 = leftX(cIdx); y1 = centerY(cIdx); x2 = rightX(pIdx); y2 = centerY(pIdx); }
-    const midx = (x1+x2)/2;
-    const colPairLabel = (f.child_columns||[]).map((c,i) => `${c}=${(f.parent_columns||[])[i]}`).join(', ');
-    const pathD = `M ${x1} ${y1} C ${midx} ${y1}, ${midx} ${y2}, ${x2} ${y2}`;
-    linksSvg += `<path class="fk-link" d="${pathD}" marker-end="url(#arr)" />`;
-    const midX = (x1+x2)/2;
-    const midY = (y1+y2)/2;
-    const offsetY = Math.abs(y2 - y1) < 10 ? -10 : (sameRow ? -10 : -8);
-    labelSvg += `<text class="fk-label" x="${midX}" y="${midY + offsetY}" text-anchor="middle" dominant-baseline="middle">${esc(colPairLabel)}</text>`;
-  });
-  const arrowDefs = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#95a5a6" /></marker></defs>`;
-  const body = `
-    <div class="fk-map-wrap">
-      <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">
-        ${arrowDefs}
-        ${linksSvg}
-        ${nodesSvg}
-        ${labelSvg}
-      </svg>
-    </div>
-    <div style="margin-top:12px;font-size:12px;color:#444;line-height:1.5;">
-      <div><strong>Legend:</strong> Blue-outlined tables = participate in at least 1 FK. Direction of arrow: <code>child → parent</code> (FK points to PK).</div>
-      <div><span style="color:#2874a6;font-weight:700;">🔑 = Primary key column</span> · <span>➡ = Foreign key column</span> · Arrow labels: <code>child_col = parent_col</code> pairs.</div>
-    </div>`;
-  showConfirm(`Schema: ${esc(schema)} — Foreign key graph`, '', {confirmText:'Close', cancelText:null}).catch(()=>{});
-  const modal = document.querySelector('.modal');
-  if (modal) {
-    modal.style.maxWidth = '98vw';
-    modal.style.width = (Math.min(1600, svgW + 80)) + 'px';
-    modal.querySelector('.modal-body').innerHTML = body;
-    const okBtn = modal.querySelector('[data-act="ok"]');
-    const cancelBtn = modal.querySelector('[data-act="cancel"]');
-    if (okBtn) okBtn.textContent = 'Close';
-    if (cancelBtn) cancelBtn.style.display = 'none';
+    console.error(e);
+    toast('ER listing error: ' + (e && e.message ? e.message : String(e)), 'error');
   }
 }
 

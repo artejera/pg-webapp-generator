@@ -350,6 +350,102 @@ app.get('/api/foreign-keys', async (req, res) => {
   } catch (e) { err(res, e); }
 });
 
+app.get('/api/er-model', async (req, res) => {
+  try {
+    const visibleSql = `
+      SELECT schema_name
+      FROM information_schema.schemata
+      WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+        AND schema_name NOT LIKE 'pg_temp_%'
+        AND schema_name NOT LIKE 'pg_toast_temp_%'
+      ORDER BY schema_name
+    `;
+    const visibleSchemasR = await runQuery(req.sessionId, visibleSql, [], { enforceLimit: false });
+    const visibleSchemas = new Set(visibleSchemasR.rows.map(r => r.schema_name));
+    const visibleParams = Array.from(visibleSchemas);
+    // Placeholder builders — each SQL statement has its own $1..$N numbering,
+    // so tablesSql and fkSql both start at $1 independently (never reuse placeholders
+    // across separate prepared statements or you get "bind delivers N params but
+    // prepared statement requires M" errors when the same IN-clause placeholder
+    // is concatenated twice into the same SQL string with the same array suffix).
+    const pH = (arr, offset = 0) => arr.map((_, i) => '$' + (i + 1 + offset)).join(',');
+
+    // Tables list with PK ordinal arrays (same pg_catalog approach):
+    const tablesSql = `
+      SELECT
+        n.nspname::text AS schema_name,
+        c.relname::text AS table_name,
+        COALESCE(pk_arr.pk_columns, '{}'::text[]) AS pk_columns
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN LATERAL (
+        SELECT array_agg(a.attname::text ORDER BY k.ord) AS pk_columns
+        FROM pg_catalog.pg_constraint con
+        JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+        WHERE con.contype = 'p' AND con.conrelid = c.oid AND a.attisdropped = false
+      ) pk_arr ON true
+      WHERE c.relkind = 'r'
+        AND n.nspname IN (${pH(visibleParams)})
+      ORDER BY n.nspname, c.relname
+    `;
+    const tablesR = await runQuery(req.sessionId, tablesSql, visibleParams.slice(), { enforceLimit: false });
+    const normalizeArr = v => {
+      if (Array.isArray(v)) return v;
+      if (typeof v === 'string') return v.replace(/^\{|\}$/g, '').split(',').filter(x => x.length);
+      return [];
+    };
+    const tables = tablesR.rows.map(r => ({
+      schema_name: r.schema_name,
+      table_name: r.table_name,
+      pk_columns: normalizeArr(r.pk_columns)
+    }));
+
+    // FKs across ALL visible schemas, no schema filter on nc or np:
+    //   nc IN $1..$N, np IN $(N+1)..$(2N) → fkParams = [schemas, schemas]
+    const N = visibleParams.length;
+    const fkSql = `
+      SELECT
+        nc.nspname::text AS child_schema,
+        c.relname::text  AS child_table,
+        np.nspname::text AS parent_schema,
+        p.relname::text  AS parent_table,
+        con.conname::text AS constraint_name,
+        string_agg(ka.attname::text, ',' ORDER BY fk.ord) AS child_columns,
+        string_agg(pa.attname::text, ',' ORDER BY fk.ord) AS parent_columns
+      FROM pg_catalog.pg_constraint con
+      JOIN pg_catalog.pg_class c      ON c.oid   = con.conrelid
+      JOIN pg_catalog.pg_namespace nc ON nc.oid  = c.relnamespace
+      JOIN pg_catalog.pg_class p      ON p.oid   = con.confrelid
+      JOIN pg_catalog.pg_namespace np ON np.oid  = p.relnamespace
+      JOIN LATERAL unnest(con.conkey)  WITH ORDINALITY AS fk(child_attnum, ord) ON true
+      JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS pk(parent_attnum, ord) ON pk.ord = fk.ord
+      JOIN pg_catalog.pg_attribute ka ON ka.attrelid = con.conrelid  AND ka.attnum = fk.child_attnum
+      JOIN pg_catalog.pg_attribute pa ON pa.attrelid = con.confrelid AND pa.attnum = pk.parent_attnum
+      WHERE con.contype = 'f'
+        AND nc.nspname IN (${pH(visibleParams)})
+        AND np.nspname IN (${pH(visibleParams, N)})
+        AND ka.attisdropped = false
+        AND pa.attisdropped = false
+      GROUP BY nc.nspname, c.relname, np.nspname, p.relname, con.conname
+      ORDER BY nc.nspname, c.relname, con.conname
+    `;
+    const fkParams = [...visibleParams, ...visibleParams];
+    const fksR = await runQuery(req.sessionId, fkSql, fkParams, { enforceLimit: false });
+    const foreign_keys = fksR.rows.map(r => ({
+      child_schema: r.child_schema,
+      child_table: r.child_table,
+      parent_schema: r.parent_schema,
+      parent_table: r.parent_table,
+      constraint_name: r.constraint_name,
+      child_columns: normalizeArr(r.child_columns),
+      parent_columns: normalizeArr(r.parent_columns)
+    }));
+
+    ok(res, { tables, foreign_keys, visible_schemas: Array.from(visibleSchemas) });
+  } catch (e) { err(res, e); }
+});
+
 function qIdent(name) {
   return '"' + String(name).replace(/"/g, '""') + '"';
 }

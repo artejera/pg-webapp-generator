@@ -133,4 +133,17 @@ Your last version seems great, really, i'm making my list of fixes, really minor
 - Please: that some of the squares in the diagram contain the list of fields of the table, and some others don't
 
 # DONE 2026-10-04D:
-- when i select the "use as master row" button/icon, can you please leve displayed the fields from that row , as a browser table with a single row ?
+- when i select the "use as master row" button/icon, can you please leave displayed the fields from that row , as a browser table with a single row ?
+
+# DONE 2026-10-04E ENTITY-RELATIONSHIP listing:
+- Remove the diagram from the webapp
+- Using the same button of the diagram, when clicked, show a text table representing the entity-relationship model of database:
+- In this E-R table show the following:
+  -  List of all the tables in the database, ordered by schema_name.table_name
+    - Sublist of the primary keys of currenttable, in key order
+    - Sublist of other tables that are referenced by this one
+      - This table contains all the primary keys of the other table, matching by field name.
+      - Marker indicating if this relationship has an inverse reference supported by a foreign-key
+    - Sublist of other tables that reference the current table
+      - The other table contains all the primary keys of the current table, matching by field name.
+      - Marker indicating if this relationship has an inverse reference supported by a foreign-key
