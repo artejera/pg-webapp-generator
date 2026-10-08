@@ -478,9 +478,9 @@ app.post('/api/rows', async (req, res) => {
   try {
     const { schema = 'public', table, filters = [], search = [], orderBy, limit, offset } = req.body;
     if (!table) throw new Error('table required');
-    const w1 = buildWhere(filters, 1);
-    const w2 = buildWhere(search, w1.idx);
-    const where = (w1.sql + w2.sql).replace(/^ WHERE  AND /, ' WHERE ');
+    const mergedFilters = [...(filters||[]), ...(search||[])];
+    const w = buildWhere(mergedFilters, 1);
+    const where = w.sql;
     let orderSql = '';
     if (orderBy && orderBy.length) {
       orderSql = ' ORDER BY ' + orderBy.map(o => `${qIdent(o.column)} ${o.desc ? 'DESC' : 'ASC'}`).join(', ');
@@ -491,14 +491,14 @@ app.post('/api/rows', async (req, res) => {
       limitSql = ` LIMIT ${lim}`;
       if (offset) limitSql += ` OFFSET ${Number(offset)}`;
     }
-    const params = [...w1.params, ...w2.params];
+    const params = w.params;
     const sql = `SELECT * FROM ${qIdent(schema)}.${qIdent(table)}${where}${orderSql}${limitSql}`;
     const countSql = `SELECT count(*)::bigint AS total FROM ${qIdent(schema)}.${qIdent(table)}${where}`;
     let total = 0;
     let countError = null;
     const data = await runQuery(req.sessionId, sql, params);
     try {
-      const noFilters = w1.params.length === 0 && w2.params.length === 0;
+      const noFilters = params.length === 0;
       if (noFilters) {
         try {
           const est = await runQuery(req.sessionId, `

@@ -147,3 +147,12 @@ Your last version seems great, really, i'm making my list of fixes, really minor
     - Sublist of other tables that reference the current table
       - The other table contains all the primary keys of the current table, matching by field name.
       - Marker indicating if this relationship has an inverse reference supported by a foreign-key
+
+# ERROR 2026-10-04F:
+- while in table browser of table 'geo.counties':
+counties (schema: geo)
+syntax error at or near "WHERE" POS: 66.
+🔍 Search — use '%' or '_' LIKE wildcards; blank = any match. Locked columns are not searchable.
+country_id ILIKE
+CA
+

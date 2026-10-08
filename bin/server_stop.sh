@@ -4,8 +4,8 @@
 # Safe for the Postgres connection pools in memory Map — TERM lets Express shut them down.
 set -euo pipefail
 
-PID_FILE="/tmp/hoty-server.pid"
-LOG_FILE="/tmp/pg-server.log"
+PID_FILE="/tmp/hotx-server.pid"
+LOG_FILE="/tmp/hotx-server.log"
 PORT=3001
 
 FORCE=0

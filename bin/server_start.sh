@@ -7,7 +7,7 @@ set -euo pipefail
 # 1. Determine where the HotX project lives on disk (one level up from bin/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PID_FILE="/tmp/hoty-server.pid"
+PID_FILE="/tmp/hotx-server.pid"
 LOG_FILE="/tmp/pg-server.log"
 
 # 2. (Optional) Make 100% sure there is no stale node or listener first.
